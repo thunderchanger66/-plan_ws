@@ -24,10 +24,12 @@ px4_bridge:
     startup_takeoff_tolerance_m: 0.08
     # FAST-LIO and PX4 local position are both relative to their EKF startup
     # positions, so the MID-360 mounting offset is not a local-frame offset.
-    # With Gazebo spawn yaw 0 and MID-360 yaw pi, lidar +x/+y map to NED -y/-x.
+    # The MID-360 model has a pi mount yaw and the plugin applies another
+    # pi output yaw. In the resulting planner frame, lidar +x/+y map to
+    # NED +y/+x.
     transform_translation: [0.0, 0.0, 0.0]
     transform_rotation_row_major: [
-      0.0, -1.0, 0.0,
-      -1.0, 0.0, 0.0,
+      0.0, 1.0, 0.0,
+      1.0, 0.0, 0.0,
       0.0, 0.0, -1.0
     ]
