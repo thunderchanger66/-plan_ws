@@ -5,6 +5,7 @@ project(quadrotor_msgs)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -14,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
         "msg/LQRTrajectory.msg"
         "msg/OutputData.msg"
         "msg/PositionCommand.msg"
+        "msg/Bspline.msg"
         "msg/PPROutputData.msg"
         "msg/Serial.msg"
         "msg/SO3Command.msg"
@@ -25,5 +27,5 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 # 将该包对应的依赖导出，其他包在调用是会自动依赖
-ament_export_dependencies(geometry_msgs nav_msgs std_msgs)
+ament_export_dependencies(geometry_msgs nav_msgs std_msgs builtin_interfaces)
 ament_package()
