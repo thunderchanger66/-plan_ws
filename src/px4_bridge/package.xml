@@ -16,6 +16,7 @@
   <exec_depend>ego_planner</exec_depend>
   <exec_depend>mid360_simulation_plugin_ros2</exec_depend>
   <exec_depend>pgo</exec_depend>
+  <exec_depend>fastlio2_px4_odom_bridge</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
