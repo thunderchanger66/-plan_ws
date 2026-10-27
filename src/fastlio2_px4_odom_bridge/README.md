@@ -40,9 +40,11 @@ Important assumptions and follow-up work:
 * The default world rotation matches the existing planner bridge:
   `PX4_NED = [lidar_y, lidar_x, -lidar_z]`. Verify this with a small-axis test
   before enabling EKF fusion.
-* `body_to_frd_row_major` maps FAST-LIO's `child_frame_id` axes to PX4 FRD.
-  The default is identity for the current simulation convention, but it must
-  be calibrated if the IMU/body axes differ.
+* In this Gazebo setup the MID-360 plugin rotates its IMU output back from the
+  sensor's pi-yaw mounting so `/livox/imu` and FAST-LIO `body` axes align with
+  X500 `base_link` (FLU: forward, left, up). PX4 uses FRD (forward, right,
+  down), so `body_to_frd_row_major` is `diag(1,-1,-1)`, a 180 degree rotation
+  about X. Real hardware must use its measured IMU/body-to-FRD rotation.
 * The node rejects an odometry message unless `header.frame_id` is `lidar`.
   It does not use TF to silently transform data.
 * The default timestamp mode uses the ROS clock at publish time. Use

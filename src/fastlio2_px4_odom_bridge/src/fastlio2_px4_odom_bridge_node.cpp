@@ -46,12 +46,13 @@ public:
       0.0, 1.0, 0.0,
       1.0, 0.0, 0.0,
       0.0, 0.0, -1.0});
-    // Maps the FAST-LIO child/body axes to PX4 FRD axes. Identity matches the
-    // current simulated body convention; real hardware must be calibrated.
+    // FAST-LIO consumes the Gazebo IMU after the MID-360 plugin removes the
+    // sensor mount yaw, leaving the X500 base_link convention (FLU). PX4 uses
+    // FRD, so FLU -> FRD is a pi rotation about X.
     declare_parameter("body_to_frd_row_major", std::vector<double>{
       1.0, 0.0, 0.0,
-      0.0, 1.0, 0.0,
-      0.0, 0.0, 1.0});
+      0.0, -1.0, 0.0,
+      0.0, 0.0, -1.0});
 
     input_frame_ = get_parameter("input_frame").as_string();
     reject_frame_mismatch_ = get_parameter("reject_frame_mismatch").as_bool();

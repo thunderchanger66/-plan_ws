@@ -17,8 +17,9 @@ fastlio2_px4_odom_bridge:
       0.0, 1.0, 0.0,
       1.0, 0.0, 0.0,
       0.0, 0.0, -1.0]
-    # Verify this experimentally for the selected FAST-LIO body convention.
+    # MID-360 plugin outputs IMU axes aligned with X500 base_link (FLU).
+    # Convert FLU to PX4 FRD with a 180 degree rotation about X.
     body_to_frd_row_major: [
       1.0, 0.0, 0.0,
-      0.0, 1.0, 0.0,
-      0.0, 0.0, 1.0]
+      0.0, -1.0, 0.0,
+      0.0, 0.0, -1.0]
