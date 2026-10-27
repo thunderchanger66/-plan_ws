@@ -16,6 +16,7 @@ namespace ego_planner
         node_->declare_parameter("fsm/flight_type", -1);
         node_->declare_parameter("fsm/thresh_replan_time", -1.0);
         node_->declare_parameter("fsm/thresh_no_replan_meter", -1.0);
+        node_->declare_parameter("fsm/goal_tolerance_m", 0.05);
         node_->declare_parameter("fsm/planning_horizon", -1.0);
         node_->declare_parameter("fsm/planning_horizen_time", -1.0);
         node_->declare_parameter("fsm/emergency_time", 1.0);
@@ -25,6 +26,7 @@ namespace ego_planner
         node_->get_parameter("fsm/flight_type", target_type_);
         node_->get_parameter("fsm/thresh_replan_time", replan_thresh_);
         node_->get_parameter("fsm/thresh_no_replan_meter", no_replan_thresh_);
+        node_->get_parameter("fsm/goal_tolerance_m", goal_tolerance_);
         node_->get_parameter("fsm/planning_horizon", planning_horizen_);
         node_->get_parameter("fsm/planning_horizen_time", planning_horizen_time_);
         node_->get_parameter("fsm/emergency_time", emergency_time_);
@@ -573,8 +575,10 @@ namespace ego_planner
 
         case REPLAN_TRAJ:
             {
-                if (planFromCurrentTraj(1))
+                const bool success = replan_from_odom_ ? planFromGlobalTraj(1) : planFromCurrentTraj(1);
+                if (success)
                 {
+                    replan_from_odom_ = false;
                     changeFSMExecState(EXEC_TRAJ, "FSM");
                     publishSwarmTrajs(false);
                 }
@@ -608,16 +612,38 @@ namespace ego_planner
                 {
                     if (t_cur > info->duration_ - 1e-2)
                     {
-                        have_target_ = false;
-                        have_trigger_ = false;
-
-                        if (target_type_ == TARGET_TYPE::PRESET_TARGET)
+                        const double goal_error = (end_pt_ - odom_pos_).norm();
+                        if (goal_error <= goal_tolerance_)
                         {
-                            wp_id_ = 0;
-                            planNextWaypoint(wps_[wp_id_]);
+                            have_target_ = false;
+                            have_trigger_ = false;
+
+                            if (target_type_ == TARGET_TYPE::PRESET_TARGET)
+                            {
+                                wp_id_ = 0;
+                                planNextWaypoint(wps_[wp_id_]);
+                            }
+
+                            changeFSMExecState(WAIT_TARGET, "FSM");
+                            goto force_return;
                         }
 
-                        changeFSMExecState(WAIT_TARGET, "FSM");
+                        RCLCPP_WARN(node_->get_logger(),
+                                    "Trajectory finished %.3f m from goal (tolerance %.3f m); replanning from odometry",
+                                    goal_error, goal_tolerance_);
+                        replan_from_odom_ = true;
+                        planNextWaypoint(end_pt_);
+                        if (planFromGlobalTraj(1))
+                        {
+                            replan_from_odom_ = false;
+                            changeFSMExecState(EXEC_TRAJ, "FSM");
+                            flag_escape_emergency_ = true;
+                            publishSwarmTrajs(false);
+                        }
+                        else
+                        {
+                            changeFSMExecState(REPLAN_TRAJ, "FSM");
+                        }
                         goto force_return;
                     }
                     else if ((end_pt_ - pos).norm() > no_replan_thresh_ && t_cur > replan_thresh_)

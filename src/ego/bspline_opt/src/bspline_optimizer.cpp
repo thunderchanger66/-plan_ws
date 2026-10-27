@@ -1596,8 +1596,9 @@ namespace ego_planner
     {
         iter_num_ = 0;
         int start_id = order_;
-        // int end_id = this->cps_.size - order_; //Fixed end
-        int end_id = this->cps_.size; // Free end
+        // Keep the final order_ control points fixed so optimization cannot
+        // move the initialized terminal position, velocity, or acceleration.
+        int end_id = this->cps_.size - order_;
         // 变量个数
         variable_num_ = 3 * (end_id - start_id);
 
@@ -1692,6 +1693,13 @@ namespace ego_planner
 
                         break;
                     }
+                }
+
+                if (!flag_occ && grid_map_->getInflateOccupancy(traj.evaluateDeBoorT(tmp)))
+                {
+                    flag_occ = true;
+                    RCLCPP_WARN(rclcpp::get_logger("rebound_optimize"),
+                                "Trajectory endpoint is inside inflated occupancy");
                 }
 
                 // cout << "XXXXXX" << ((cps_.points.col(cps_.points.cols()-1) + 4*cps_.points.col(cps_.points.cols()-2) + cps_.points.col(cps_.points.cols()-3))/6 - local_target_pt_).norm() << endl;
