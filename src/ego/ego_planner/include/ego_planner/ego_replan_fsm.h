@@ -52,6 +52,7 @@ namespace ego_planner
         /* parameters */
         int target_type_; // 1 mannual select, 2 hard code
         double no_replan_thresh_, replan_thresh_, goal_tolerance_;
+        double replan_retry_interval_{0.25};
         double waypoints_[50][3];
         int waypoint_num_, wp_id_;
         bool replan_from_odom_{false};
@@ -79,6 +80,7 @@ namespace ego_planner
         /* ROS utils */
         rclcpp::Node::SharedPtr node_;
         rclcpp::TimerBase::SharedPtr exec_timer_, safety_timer_;
+        rclcpp::Time next_plan_attempt_;
 
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr waypoint_sub_;
         rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;

@@ -47,6 +47,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
     node_->declare_parameter("grid_map/local_map_margin", 1);
     node_->declare_parameter("grid_map/ground_height", 1.0);
     node_->declare_parameter("grid_map/odom_depth_timeout", 1.0);
+    node_->declare_parameter("grid_map/cloud_voxel_retention_sec", 4.0);
 
     node_->get_parameter("grid_map/resolution", mp_.resolution_);
     node_->get_parameter("grid_map/map_size_x", x_size);
@@ -84,6 +85,14 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
     node_->get_parameter("grid_map/local_map_margin", mp_.local_map_margin_);
     node_->get_parameter("grid_map/ground_height", mp_.ground_height_);
     node_->get_parameter("grid_map/odom_depth_timeout", mp_.odom_depth_timeout_);
+    node_->get_parameter("grid_map/cloud_voxel_retention_sec", mp_.cloud_voxel_retention_sec_);
+    if (!std::isfinite(mp_.cloud_voxel_retention_sec_) ||
+        mp_.cloud_voxel_retention_sec_ < 0.5 || mp_.cloud_voxel_retention_sec_ > 60.0)
+    {
+        RCLCPP_WARN(node_->get_logger(),
+                    "grid_map/cloud_voxel_retention_sec must be in [0.5, 60]; using 4.0 s");
+        mp_.cloud_voxel_retention_sec_ = 4.0;
+    }
     std::cout<<"hhhhhhhhhhhhhhhhhhhhhhhhhhhh!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"<<std::endl;
     if (mp_.virtual_ceil_height_ - mp_.ground_height_ > z_size)
     {
@@ -119,6 +128,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
 
     md_.occupancy_buffer_ = vector<double>(buffer_size, mp_.clamp_min_log_ - mp_.unknown_flag_);
     md_.occupancy_buffer_inflate_ = vector<char>(buffer_size, 0);
+    md_.cloud_hit_time_sec_ = vector<double>(buffer_size, 0.0);
 
     md_.count_hit_and_miss_ = vector<short>(buffer_size, 0);
     md_.count_hit_ = vector<short>(buffer_size, 0);
@@ -832,83 +842,73 @@ void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstPtr& img)
     if (isnan(md_.camera_pos_(0)) || isnan(md_.camera_pos_(1)) || isnan(md_.camera_pos_(2)))
         return;
 
-    this->resetBuffer(md_.camera_pos_ - mp_.local_update_range_,
-                      md_.camera_pos_ + mp_.local_update_range_);
+    const double now_sec = node_->now().seconds();
+    Eigen::Vector3i min_idx, max_idx;
+    posToIndex(md_.camera_pos_ - mp_.local_update_range_, min_idx);
+    posToIndex(md_.camera_pos_ + mp_.local_update_range_, max_idx);
+    boundIndex(min_idx);
+    boundIndex(max_idx);
 
-    pcl::PointXYZ pt;
-    Eigen::Vector3d p3d, p3d_inf;
-
-    int inf_step = ceil(mp_.obstacles_inflation_ / mp_.resolution_);
-    int inf_step_z = 1;
-
-    double max_x, max_y, max_z, min_x, min_y, min_z;
-
-    min_x = mp_.map_max_boundary_(0);
-    min_y = mp_.map_max_boundary_(1);
-    min_z = mp_.map_max_boundary_(2);
-
-    max_x = mp_.map_min_boundary_(0);
-    max_y = mp_.map_min_boundary_(1);
-    max_z = mp_.map_min_boundary_(2);
-
-    for (size_t i = 0; i < latest_cloud.points.size(); ++i)
+    // Keep recent hit voxels so a sparse scan does not erase walls that are
+    // temporarily outside the current Livox return set.
+    for (const auto &pt : latest_cloud.points)
     {
-        pt = latest_cloud.points[i];
-        p3d(0) = pt.x, p3d(1) = pt.y, p3d(2) = pt.z;
-
-        /* point inside update range */
-        Eigen::Vector3d devi = p3d - md_.camera_pos_;
-        Eigen::Vector3i inf_pt;
-
-        if (fabs(devi(0)) < mp_.local_update_range_(0) && fabs(devi(1)) < mp_.local_update_range_(1) &&
-            fabs(devi(2)) < mp_.local_update_range_(2))
-        {
-            /* inflate the point */
-            // 点云膨胀
-            for (int x = -inf_step; x <= inf_step; ++x)
-                for (int y = -inf_step; y <= inf_step; ++y)
-                    for (int z = -inf_step_z; z <= inf_step_z; ++z)
-                    {
-                        p3d_inf(0) = pt.x + x * mp_.resolution_;
-                        p3d_inf(1) = pt.y + y * mp_.resolution_;
-                        p3d_inf(2) = pt.z + z * mp_.resolution_;
-
-                        max_x = max(max_x, p3d_inf(0));
-                        max_y = max(max_y, p3d_inf(1));
-                        max_z = max(max_z, p3d_inf(2));
-
-                        min_x = min(min_x, p3d_inf(0));
-                        min_y = min(min_y, p3d_inf(1));
-                        min_z = min(min_z, p3d_inf(2));
-
-                        posToIndex(p3d_inf, inf_pt);
-
-                        if (!isInMap(inf_pt))
-                            continue;
-
-                        int idx_inf = toAddress(inf_pt);
-
-                        md_.occupancy_buffer_inflate_[idx_inf] = 1;
-                    }
-        }
+        if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) continue;
+        Eigen::Vector3d point(pt.x, pt.y, pt.z);
+        if (!isInMap(point) ||
+            ((point - md_.camera_pos_).cwiseAbs().array() > mp_.local_update_range_.array()).any())
+            continue;
+        Eigen::Vector3i idx;
+        posToIndex(point, idx);
+        md_.cloud_hit_time_sec_[toAddress(idx)] = now_sec;
     }
 
-    min_x = min(min_x, md_.camera_pos_(0));
-    min_y = min(min_y, md_.camera_pos_(1));
-    min_z = min(min_z, md_.camera_pos_(2));
+    const int inflate_steps = std::max(0, static_cast<int>(
+        std::ceil(mp_.obstacles_inflation_ / mp_.resolution_)));
+    Eigen::Vector3i clear_min = min_idx;
+    Eigen::Vector3i clear_max = max_idx;
+    if (md_.cloud_window_initialized_)
+    {
+        clear_min = clear_min.cwiseMin(md_.last_cloud_min_idx_);
+        clear_max = clear_max.cwiseMax(md_.last_cloud_max_idx_);
+    }
+    clear_min -= Eigen::Vector3i::Constant(inflate_steps);
+    clear_max += Eigen::Vector3i::Constant(inflate_steps);
+    boundIndex(clear_min);
+    boundIndex(clear_max);
+    for (int x = clear_min.x(); x <= clear_max.x(); ++x)
+        for (int y = clear_min.y(); y <= clear_max.y(); ++y)
+            for (int z = clear_min.z(); z <= clear_max.z(); ++z)
+                md_.occupancy_buffer_inflate_[toAddress(x, y, z)] = 0;
 
-    max_x = max(max_x, md_.camera_pos_(0));
-    max_y = max(max_y, md_.camera_pos_(1));
-    max_z = max(max_z, md_.camera_pos_(2));
+    const double cutoff = now_sec - mp_.cloud_voxel_retention_sec_;
+    for (int x = min_idx.x(); x <= max_idx.x(); ++x)
+        for (int y = min_idx.y(); y <= max_idx.y(); ++y)
+            for (int z = min_idx.z(); z <= max_idx.z(); ++z)
+            {
+                const int address = toAddress(x, y, z);
+                const double hit_time = md_.cloud_hit_time_sec_[address];
+                if (hit_time <= 0.0) continue;
+                if (hit_time < cutoff)
+                {
+                    md_.cloud_hit_time_sec_[address] = 0.0;
+                    continue;
+                }
+                for (int dx = -inflate_steps; dx <= inflate_steps; ++dx)
+                    for (int dy = -inflate_steps; dy <= inflate_steps; ++dy)
+                        for (int dz = -1; dz <= 1; ++dz)
+                        {
+                            Eigen::Vector3i neighbor(x + dx, y + dy, z + dz);
+                            if (isInMap(neighbor))
+                                md_.occupancy_buffer_inflate_[toAddress(neighbor)] = 1;
+                        }
+            }
 
-    max_z = max(max_z, mp_.ground_height_);
-
-    posToIndex(Eigen::Vector3d(max_x, max_y, max_z), md_.local_bound_max_);
-    posToIndex(Eigen::Vector3d(min_x, min_y, min_z), md_.local_bound_min_);
-
-    // 更新局部地图边界
-    boundIndex(md_.local_bound_min_);
-    boundIndex(md_.local_bound_max_);
+    md_.local_bound_min_ = clear_min;
+    md_.local_bound_max_ = clear_max;
+    md_.last_cloud_min_idx_ = min_idx;
+    md_.last_cloud_max_idx_ = max_idx;
+    md_.cloud_window_initialized_ = true;
 
     // add virtual ceiling to limit flight height
     // 添加虚拟天花板控制飞行高度

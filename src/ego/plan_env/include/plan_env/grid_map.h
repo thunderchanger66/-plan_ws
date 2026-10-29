@@ -57,6 +57,8 @@ struct MappingParameters
 
     /* time out */
     double odom_depth_timeout_;
+    // Retain LiDAR hit voxels briefly between sparse world-cloud messages.
+    double cloud_voxel_retention_sec_;
 
     /* depth image projection filtering */
     double depth_filter_maxdist_, depth_filter_mindist_, depth_filter_tolerance_;
@@ -90,6 +92,7 @@ struct MappingData
 
     std::vector<double> occupancy_buffer_;
     std::vector<char> occupancy_buffer_inflate_;
+    std::vector<double> cloud_hit_time_sec_;
 
     // camera position and pose data
 
@@ -133,6 +136,10 @@ struct MappingData
 
     double fuse_time_, max_fuse_time_;
     int update_num_;
+
+    Eigen::Vector3i last_cloud_min_idx_{Eigen::Vector3i::Zero()};
+    Eigen::Vector3i last_cloud_max_idx_{Eigen::Vector3i::Zero()};
+    bool cloud_window_initialized_{false};
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };

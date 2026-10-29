@@ -17,6 +17,8 @@ def generate_launch_description():
     bridge_params = LaunchConfiguration("bridge_params")
     odom_bridge_params = LaunchConfiguration("odom_bridge_params")
     start_odom_bridge = LaunchConfiguration("start_odom_bridge")
+    start_rviz = LaunchConfiguration("start_rviz")
+    start_agent = LaunchConfiguration("start_agent")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -24,9 +26,15 @@ def generate_launch_description():
             default_value=os.path.join(bridge_share, "config", "sitl_control.yaml"),
             description="Bridge parameter file; defaults to the checked-in SITL control profile"),
         DeclareLaunchArgument(
+            "start_agent", default_value="true",
+            description="Start Micro XRCE-DDS Agent on UDP 8888"),
+        DeclareLaunchArgument(
             "start_odom_bridge",
             default_value="true",
             description="Start FAST-LIO2 to PX4 external-odometry bridge"),
+        DeclareLaunchArgument(
+            "start_rviz", default_value="true",
+            description="Start the EGO RViz visualization"),
         DeclareLaunchArgument(
             "odom_bridge_params",
             default_value=os.path.join(
@@ -38,6 +46,7 @@ def generate_launch_description():
             output="screen",
             respawn=True,
             respawn_delay=2.0,
+            condition=IfCondition(start_agent),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -45,6 +54,7 @@ def generate_launch_description():
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(ego_share, "launch", "rviz.launch.py")),
+            condition=IfCondition(start_rviz),
         ),
         Node(
             package="px4_bridge",

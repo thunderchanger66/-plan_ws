@@ -8,9 +8,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time", default="false")
     planning_frame = LaunchConfiguration("planning_frame", default="world")
     # LaunchConfigurations
-    map_size_x = LaunchConfiguration('map_size_x_', default=42.0)
-    map_size_y = LaunchConfiguration('map_size_y_', default=30.0)
-    map_size_z = LaunchConfiguration('map_size_z_', default=5.0)
+    map_size_x = LaunchConfiguration('map_size_x_', default=80.0)
+    map_size_y = LaunchConfiguration('map_size_y_', default=80.0)
+    map_size_z = LaunchConfiguration('map_size_z_', default=4.0)
     
     odometry_topic = LaunchConfiguration('odometry_topic', default='odom')
     camera_pose_topic = LaunchConfiguration('camera_pose_topic', default='camera_pose')
@@ -125,6 +125,7 @@ def generate_launch_description():
             {'fsm/thresh_replan_time': 1.0},
             {'fsm/thresh_no_replan_meter': 1.0},
             {'fsm/goal_tolerance_m': 0.05},
+            {'fsm/replan_retry_interval': 0.25},
             {'fsm/planning_horizon': planning_horizon},
             {'fsm/planning_horizen_time': 3.0},
             {'fsm/emergency_time': 1.0},
@@ -152,10 +153,12 @@ def generate_launch_description():
             {'grid_map/map_size_x': map_size_x},
             {'grid_map/map_size_y': map_size_y},
             {'grid_map/map_size_z': map_size_z},
-            {'grid_map/local_update_range_x': 5.5},
-            {'grid_map/local_update_range_y': 5.5},
-            {'grid_map/local_update_range_z': 4.5},
+            {'grid_map/local_update_range_x': 10.0},
+            {'grid_map/local_update_range_y': 10.0},
+            {'grid_map/local_update_range_z': 3.0},
             {'grid_map/obstacles_inflation': 0.19},
+            # Keep the LiDAR hit map stable across sparse world-cloud scans.
+            {'grid_map/cloud_voxel_retention_sec': 4.0},
             {'grid_map/local_map_margin': 10},
             {'grid_map/ground_height': -0.01},
             # camera parameter
@@ -164,7 +167,7 @@ def generate_launch_description():
             {'grid_map/fx': fx},
             {'grid_map/fy': fy},
             # depth filter
-            {'grid_map/use_depth_filter': True},
+            {'grid_map/use_depth_filter': False},
             {'grid_map/depth_filter_tolerance': 0.15},
             {'grid_map/depth_filter_maxdist': 5.0},
             {'grid_map/depth_filter_mindist': 0.2},

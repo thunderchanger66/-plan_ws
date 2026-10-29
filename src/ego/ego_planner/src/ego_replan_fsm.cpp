@@ -17,6 +17,7 @@ namespace ego_planner
         node_->declare_parameter("fsm/thresh_replan_time", -1.0);
         node_->declare_parameter("fsm/thresh_no_replan_meter", -1.0);
         node_->declare_parameter("fsm/goal_tolerance_m", 0.05);
+        node_->declare_parameter("fsm/replan_retry_interval", 0.25);
         node_->declare_parameter("fsm/planning_horizon", -1.0);
         node_->declare_parameter("fsm/planning_horizen_time", -1.0);
         node_->declare_parameter("fsm/emergency_time", 1.0);
@@ -27,6 +28,13 @@ namespace ego_planner
         node_->get_parameter("fsm/thresh_replan_time", replan_thresh_);
         node_->get_parameter("fsm/thresh_no_replan_meter", no_replan_thresh_);
         node_->get_parameter("fsm/goal_tolerance_m", goal_tolerance_);
+        node_->get_parameter("fsm/replan_retry_interval", replan_retry_interval_);
+        if (!std::isfinite(replan_retry_interval_) || replan_retry_interval_ < 0.05)
+        {
+            RCLCPP_WARN(node_->get_logger(), "fsm/replan_retry_interval must be >= 0.05; using 0.25 s");
+            replan_retry_interval_ = 0.25;
+        }
+        next_plan_attempt_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
         node_->get_parameter("fsm/planning_horizon", planning_horizen_);
         node_->get_parameter("fsm/planning_horizen_time", planning_horizen_time_);
         node_->get_parameter("fsm/emergency_time", emergency_time_);
@@ -591,15 +599,19 @@ namespace ego_planner
 
         case GEN_NEW_TRAJ:
             {
+                if (node_->now() < next_plan_attempt_)
+                    break;
                 bool success = planFromGlobalTraj(10); // zx-todo
                 if (success)
                 {
+                    next_plan_attempt_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
                     changeFSMExecState(EXEC_TRAJ, "FSM");
                     flag_escape_emergency_ = true;
                     publishSwarmTrajs(false);
                 }
                 else
                 {
+                    next_plan_attempt_ = node_->now() + rclcpp::Duration::from_seconds(replan_retry_interval_);
                     changeFSMExecState(GEN_NEW_TRAJ, "FSM");
                 }
                 break;
@@ -607,15 +619,19 @@ namespace ego_planner
 
         case REPLAN_TRAJ:
             {
+                if (node_->now() < next_plan_attempt_)
+                    break;
                 const bool success = replan_from_odom_ ? planFromGlobalTraj(1) : planFromCurrentTraj(1);
                 if (success)
                 {
+                    next_plan_attempt_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
                     replan_from_odom_ = false;
                     changeFSMExecState(EXEC_TRAJ, "FSM");
                     publishSwarmTrajs(false);
                 }
                 else
                 {
+                    next_plan_attempt_ = node_->now() + rclcpp::Duration::from_seconds(replan_retry_interval_);
                     changeFSMExecState(REPLAN_TRAJ, "FSM");
                 }
 
@@ -836,13 +852,17 @@ namespace ego_planner
 
             if (occ)
             {
+                if (node_->now() < next_plan_attempt_)
+                    break;
                 if (planFromCurrentTraj()) // Make a chance
                 {
+                    next_plan_attempt_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
                     changeFSMExecState(EXEC_TRAJ, "SAFETY");
                     publishSwarmTrajs(false);
                 }
                 else
                 {
+                    next_plan_attempt_ = node_->now() + rclcpp::Duration::from_seconds(replan_retry_interval_);
                     if (t - t_cur < emergency_time_) // 0.8s of emergency time
                     {
                         RCLCPP_WARN(node_->get_logger(), "Suddenly discovered obstacles. emergency stop! time=%f",
