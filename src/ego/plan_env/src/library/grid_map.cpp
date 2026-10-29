@@ -174,11 +174,14 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
         "grid_map/odom", rclcpp::QoS(100).best_effort(), std::bind(&GridMap::odomCallback, this, std::placeholders::_1));
 
     // 定时器
-    occ_timer_ = node_->create_wall_timer(
+    // Map updates are simulation-time work.  With the Gazebo GUI enabled the
+    // real-time factor can drop; wall timers then run ahead of /clock and make
+    // the planner process the same simulated pose repeatedly.
+    occ_timer_ = node_->create_timer(
         std::chrono::duration<double>(0.05),
         std::bind(&GridMap::updateOccupancyCallback, this));
 
-    vis_timer_ = node_->create_wall_timer(
+    vis_timer_ = node_->create_timer(
         std::chrono::duration<double>(0.11),
         std::bind(&GridMap::visCallback, this));
 

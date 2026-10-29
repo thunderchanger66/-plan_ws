@@ -253,7 +253,10 @@ int main(int argc, char** argv)
         "/position_cmd",
         50);
 
-    auto cmd_timer = node->create_wall_timer(
+    // Use the node/ROS clock because trajectory time is based on /clock when
+    // running Gazebo with use_sim_time=true.  A wall timer publishes many
+    // duplicate samples when the GUI lowers the simulation real-time factor.
+    auto cmd_timer = node->create_timer(
         std::chrono::milliseconds(10),
         cmdCallback);
 

@@ -60,11 +60,16 @@ namespace ego_planner
         planner_manager_->setDroneIdtoOpt();
 
         /* callback*/
-        exec_timer_ = node_->create_wall_timer(std::chrono::milliseconds(10),
-                                               std::bind(&EGOReplanFSM::execFSMCallback, this));
+        // This planner runs with use_sim_time=true.  A wall timer keeps firing
+        // when Gazebo is rendering slowly or paused, while node_->now() (and
+        // trajectory timestamps) advances with /clock.  That produces several
+        // FSM decisions for the same simulation instant and can cause repeated
+        // replans/oscillation near the goal.  Drive planning from ROS time.
+        exec_timer_ = node_->create_timer(std::chrono::milliseconds(10),
+                                          std::bind(&EGOReplanFSM::execFSMCallback, this));
 
-        safety_timer_ = node_->create_wall_timer(std::chrono::milliseconds(50),
-                                                 std::bind(&EGOReplanFSM::checkCollisionCallback, this));
+        safety_timer_ = node_->create_timer(std::chrono::milliseconds(50),
+                                            std::bind(&EGOReplanFSM::checkCollisionCallback, this));
 
         // odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
         //     "odom_world",
