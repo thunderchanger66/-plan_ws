@@ -276,20 +276,47 @@ namespace ego_planner
                                  msg->header.frame_id.c_str());
             return;
         }
-        odom_pos_(0) = msg->pose.pose.position.x;
-        odom_pos_(1) = msg->pose.pose.position.y;
-        odom_pos_(2) = msg->pose.pose.position.z;
+        const Eigen::Vector3d position(
+            msg->pose.pose.position.x,
+            msg->pose.pose.position.y,
+            msg->pose.pose.position.z);
+        Eigen::Quaterniond orientation(
+            msg->pose.pose.orientation.w,
+            msg->pose.pose.orientation.x,
+            msg->pose.pose.orientation.y,
+            msg->pose.pose.orientation.z);
+        if (!position.allFinite() || !std::isfinite(orientation.norm()) ||
+            orientation.norm() < 1e-6) {
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                 "Ignoring odometry with invalid pose or orientation");
+            return;
+        }
+        orientation.normalize();
 
-        odom_vel_(0) = msg->twist.twist.linear.x;
-        odom_vel_(1) = msg->twist.twist.linear.y;
-        odom_vel_(2) = msg->twist.twist.linear.z;
+        // FAST-LIO publishes twist in child_frame_id (the body frame), while
+        // EGO's state and trajectory are expressed in header.frame_id (lidar).
+        // Rotate the measured velocity into the planning/world frame before
+        // using it as the initial condition for a trajectory.
+        const Eigen::Vector3d child_velocity(
+            msg->twist.twist.linear.x,
+            msg->twist.twist.linear.y,
+            msg->twist.twist.linear.z);
+        if (!child_velocity.allFinite()) {
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                 "Ignoring odometry with invalid velocity");
+            return;
+        }
+        const Eigen::Vector3d world_velocity = orientation * child_velocity;
+        if (!world_velocity.allFinite()) {
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                 "Ignoring odometry with invalid world velocity");
+            return;
+        }
+        odom_pos_ = position;
+        odom_orient_ = orientation;
+        odom_vel_ = world_velocity;
 
         // odom_acc_ = estimateAcc( msg );
-
-        odom_orient_.w() = msg->pose.pose.orientation.w;
-        odom_orient_.x() = msg->pose.pose.orientation.x;
-        odom_orient_.y() = msg->pose.pose.orientation.y;
-        odom_orient_.z() = msg->pose.pose.orientation.z;
 
         have_odom_ = true;
     }
