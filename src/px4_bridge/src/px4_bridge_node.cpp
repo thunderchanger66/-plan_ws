@@ -75,6 +75,7 @@ public:
     declare_parameter("prestream_seconds", 1.0);
     declare_parameter("publish_rate_hz", 20.0);
     declare_parameter("max_command_age_sec", 0.5);
+    declare_parameter("planner_watchdog_timeout_sec", 0.5);
     declare_parameter("max_abs_position_m", 10.0);
     declare_parameter("max_velocity_mps", 5.0);
     declare_parameter("max_acceleration_mps2", 10.0);
@@ -97,6 +98,9 @@ public:
     arm_on_first_ = get_parameter("arm_on_first_command").as_bool();
     prestream_seconds_ = get_parameter("prestream_seconds").as_double();
     max_command_age_sec_ = get_parameter("max_command_age_sec").as_double();
+    planner_watchdog_timeout_sec_ = get_parameter("planner_watchdog_timeout_sec").as_double();
+    if (!std::isfinite(planner_watchdog_timeout_sec_) || planner_watchdog_timeout_sec_ <= 0.0)
+      throw std::runtime_error("planner watchdog timeout must be positive");
     max_abs_position_m_ = get_parameter("max_abs_position_m").as_double();
     max_velocity_mps_ = get_parameter("max_velocity_mps").as_double();
     max_acceleration_mps2_ = get_parameter("max_acceleration_mps2").as_double();
@@ -122,6 +126,9 @@ public:
     command_sub_ = create_subscription<PositionCommand>(
       get_parameter("planner_command_topic").as_string(), rclcpp::QoS(10),
       std::bind(&PlannerPx4Bridge::command_callback, this, std::placeholders::_1));
+    emergency_sub_ = create_subscription<std_msgs::msg::Empty>(
+      "/planning/emergency_stop", rclcpp::QoS(10),
+      std::bind(&PlannerPx4Bridge::emergency_callback, this, std::placeholders::_1));
     manual_yaw_sub_ = create_subscription<std_msgs::msg::Float64>(
       get_parameter("manual_yaw_topic").as_string(), rclcpp::QoS(10),
       std::bind(&PlannerPx4Bridge::manual_yaw_callback, this, std::placeholders::_1));
@@ -266,6 +273,28 @@ private:
     publish_status("manual_yaw_cleared_using_planner_yaw");
   }
 
+  void latch_px4_hold(const std::string & why)
+  {
+    if (!local_position_) {
+      publish_status("cannot_hold_px4_no_valid_local_position:" + why);
+      return;
+    }
+    Setpoint hold;
+    hold.position = *local_position_;
+    hold.yaw = px4_heading_;
+    latest_setpoint_ = hold;
+    bridge_emergency_hold_ = true;
+    publish_status("px4_position_hold_latched:" + why);
+  }
+
+  void emergency_callback(const std_msgs::msg::Empty::SharedPtr)
+  {
+    if (!bridge_emergency_hold_) {
+      held_trajectory_id_ = last_trajectory_id_.value_or(0);
+      latch_px4_hold("planner_emergency_stop");
+    }
+  }
+
   void command_callback(const PositionCommand::SharedPtr msg)
   {
     if (startup_takeoff_initialized_ && !startup_takeoff_complete_) {
@@ -280,6 +309,10 @@ private:
       publish_status("rejected_frame:" +
         (msg->header.frame_id.empty() ? std::string("<empty>") : msg->header.frame_id) +
         ":expected:" + planner_frame_);
+      return;
+    }
+    if (bridge_emergency_hold_ && held_trajectory_id_ &&
+        msg->trajectory_id <= *held_trajectory_id_) {
       return;
     }
     if (msg->trajectory_flag != PositionCommand::TRAJECTORY_STATUS_READY) {
@@ -353,6 +386,10 @@ private:
       return;
     }
 
+    last_trajectory_id_ = msg->trajectory_id;
+    latest_command_time_ = std::chrono::steady_clock::now();
+    bridge_emergency_hold_ = false;
+    held_trajectory_id_.reset();
     latest_setpoint_ = output;
     if (!first_command_time_) {
       first_command_time_ = std::chrono::steady_clock::now();
@@ -396,6 +433,14 @@ private:
       return;
     }
 
+    const auto steady_now_watchdog = std::chrono::steady_clock::now();
+    if (!bridge_emergency_hold_ && latest_command_time_ &&
+        std::chrono::duration<double>(steady_now_watchdog - *latest_command_time_).count() >
+            planner_watchdog_timeout_sec_) {
+      held_trajectory_id_ = last_trajectory_id_.value_or(0);
+      latch_px4_hold("planner_command_watchdog_timeout");
+    }
+
     const uint64_t timestamp = px4_timestamp_;
     px4_msgs::msg::OffboardControlMode mode;
     mode.timestamp = timestamp;
@@ -411,7 +456,7 @@ private:
     setpoint.yaw = static_cast<float>(latest_setpoint_->yaw);
     setpoint.yawspeed = static_cast<float>(latest_setpoint_->yaw_rate);
     setpoint_pub_->publish(setpoint);
-    if (!start_offboard_) {
+    if (bridge_emergency_hold_ || !start_offboard_) {
       return;
     }
     const auto elapsed = std::chrono::duration<double>(
@@ -553,6 +598,11 @@ private:
   bool arm_requested_{false};
   double prestream_seconds_{1.0};
   double max_command_age_sec_{0.5};
+  double planner_watchdog_timeout_sec_{0.5};
+  bool bridge_emergency_hold_{false};
+  std::optional<uint32_t> held_trajectory_id_;
+  std::optional<uint32_t> last_trajectory_id_;
+  std::optional<std::chrono::steady_clock::time_point> latest_command_time_;
   double max_abs_position_m_{10.0};
   double max_velocity_mps_{5.0};
   double max_acceleration_mps2_{10.0};
@@ -582,6 +632,7 @@ private:
   std::optional<px4_msgs::msg::VehicleStatus> vehicle_status_;
   uint64_t px4_timestamp_{0};
   rclcpp::Subscription<PositionCommand>::SharedPtr command_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr emergency_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr manual_yaw_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr clear_manual_yaw_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_position_sub_;

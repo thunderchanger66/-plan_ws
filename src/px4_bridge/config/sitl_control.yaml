@@ -16,6 +16,7 @@ px4_bridge:
     prestream_seconds: 1.0
     publish_rate_hz: 20.0
     max_command_age_sec: 0.5
+    planner_watchdog_timeout_sec: 0.5
     max_abs_position_m: 10.0
     max_velocity_mps: 5.0
     max_acceleration_mps2: 10.0
