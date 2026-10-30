@@ -1,6 +1,7 @@
 #include <ego_planner/ego_replan_fsm.h>
 
 #include <memory>
+#include <stdexcept>
 namespace ego_planner
 {
     void EGOReplanFSM::init(rclcpp::Node::SharedPtr& node)
@@ -12,12 +13,16 @@ namespace ego_planner
         have_target_ = false;
         have_odom_ = false;
         have_recv_pre_agent_ = false;
+        flag_escape_emergency_ = true;
 
         node_->declare_parameter("fsm/flight_type", -1);
         node_->declare_parameter("fsm/thresh_replan_time", -1.0);
         node_->declare_parameter("fsm/thresh_no_replan_meter", -1.0);
         node_->declare_parameter("fsm/goal_tolerance_m", 0.05);
         node_->declare_parameter("fsm/replan_retry_interval", 0.25);
+        node_->declare_parameter("fsm/odom_timeout_sec", 0.5);
+        node_->declare_parameter("fsm/odom_max_speed_mps", 5.0);
+        node_->declare_parameter("fsm/odom_position_jump_slack_m", 0.35);
         node_->declare_parameter("fsm/planning_horizon", -1.0);
         node_->declare_parameter("fsm/planning_horizen_time", -1.0);
         node_->declare_parameter("fsm/emergency_time", 1.0);
@@ -34,6 +39,13 @@ namespace ego_planner
             RCLCPP_WARN(node_->get_logger(), "fsm/replan_retry_interval must be >= 0.05; using 0.25 s");
             replan_retry_interval_ = 0.25;
         }
+        node_->get_parameter("fsm/odom_timeout_sec", odom_timeout_sec_);
+        node_->get_parameter("fsm/odom_max_speed_mps", odom_max_speed_mps_);
+        node_->get_parameter("fsm/odom_position_jump_slack_m", odom_position_jump_slack_m_);
+        if (!std::isfinite(odom_timeout_sec_) || odom_timeout_sec_ <= 0.0) odom_timeout_sec_ = 0.5;
+        if (!std::isfinite(odom_max_speed_mps_) || odom_max_speed_mps_ <= 0.0) odom_max_speed_mps_ = 5.0;
+        if (!std::isfinite(odom_position_jump_slack_m_) || odom_position_jump_slack_m_ < 0.0)
+            odom_position_jump_slack_m_ = 0.35;
         next_plan_attempt_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
         node_->get_parameter("fsm/planning_horizon", planning_horizen_);
         node_->get_parameter("fsm/planning_horizen_time", planning_horizen_time_);
@@ -46,6 +58,20 @@ namespace ego_planner
         node_->declare_parameter("fsm/waypoint_num", -1);
         node_->get_parameter("fsm/waypoint_num", waypoint_num_);
 
+        if (target_type_ < MANUAL_TARGET || target_type_ > REFENCE_PATH)
+        {
+            RCLCPP_FATAL(node_->get_logger(), "fsm/flight_type must be 1, 2, or 3 (got %d)", target_type_);
+            throw std::invalid_argument("invalid EGO flight_type");
+        }
+        if (waypoint_num_ < 0 || waypoint_num_ > 50 ||
+            (target_type_ == PRESET_TARGET && waypoint_num_ == 0))
+        {
+            RCLCPP_FATAL(node_->get_logger(),
+                         "fsm/waypoint_num must be in [1, 50] for preset targets and [0, 50] otherwise (got %d)",
+                         waypoint_num_);
+            throw std::invalid_argument("invalid EGO waypoint_num");
+        }
+
         for (int i = 0; i < waypoint_num_; i++)
         {
             node_->declare_parameter("fsm/waypoint" + to_string(i) + "_x", -1.0);
@@ -55,6 +81,12 @@ namespace ego_planner
             node_->get_parameter("fsm/waypoint" + to_string(i) + "_x", waypoints_[i][0]);
             node_->get_parameter("fsm/waypoint" + to_string(i) + "_y", waypoints_[i][1]);
             node_->get_parameter("fsm/waypoint" + to_string(i) + "_z", waypoints_[i][2]);
+            if (!std::isfinite(waypoints_[i][0]) || !std::isfinite(waypoints_[i][1]) ||
+                !std::isfinite(waypoints_[i][2]))
+            {
+                RCLCPP_FATAL(node_->get_logger(), "Waypoint %d contains a non-finite coordinate", i);
+                throw std::invalid_argument("non-finite EGO waypoint");
+            }
         }
 
         /* initialize main modules */
@@ -271,6 +303,12 @@ namespace ego_planner
 
         Eigen::Vector3d end_wp(
             msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
+        if (!end_wp.allFinite() || !planner_manager_->grid_map_->isInMap(end_wp))
+        {
+            RCLCPP_ERROR(node_->get_logger(), "Rejecting goal outside the configured occupancy-map bounds: %.2f %.2f %.2f",
+                         end_wp.x(), end_wp.y(), end_wp.z());
+            return;
+        }
 
         planNextWaypoint(end_wp);
     }
@@ -288,6 +326,12 @@ namespace ego_planner
             msg->pose.pose.position.x,
             msg->pose.pose.position.y,
             msg->pose.pose.position.z);
+        if (!position.allFinite() || !planner_manager_->grid_map_->isInMap(position))
+        {
+            RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                  "Rejecting odometry outside the configured occupancy-map bounds");
+            return;
+        }
         Eigen::Quaterniond orientation(
             msg->pose.pose.orientation.w,
             msg->pose.pose.orientation.x,
@@ -314,6 +358,34 @@ namespace ego_planner
                                  "Ignoring odometry with invalid velocity");
             return;
         }
+        const rclcpp::Time stamp(msg->header.stamp, node_->get_clock()->get_clock_type());
+        const double age = (node_->now() - stamp).seconds();
+        const double speed = child_velocity.norm();
+        if (stamp.nanoseconds() <= 0 || !std::isfinite(age) || age < -0.05 ||
+            age > odom_timeout_sec_ || !std::isfinite(speed) || speed > odom_max_speed_mps_)
+        {
+            RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                  "Rejecting stale/invalid odometry: age %.3f s, speed %.2f m/s", age, speed);
+            return;
+        }
+        if (have_odom_)
+        {
+            const double dt = (stamp - last_odom_stamp_).seconds();
+            if (!std::isfinite(dt) || dt <= 0.0)
+            {
+                RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                     "Rejecting odometry with repeated or out-of-order timestamp");
+                return;
+            }
+            const double step = (position - last_odom_pos_).norm();
+            const double limit = odom_position_jump_slack_m_ + odom_max_speed_mps_ * dt;
+            if (!std::isfinite(step) || step > limit)
+            {
+                RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                      "Rejecting odometry jump %.2f m over %.3f s (limit %.2f m)", step, dt, limit);
+                return;
+            }
+        }
         const Eigen::Vector3d world_velocity = orientation * child_velocity;
         if (!world_velocity.allFinite()) {
             RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
@@ -323,10 +395,20 @@ namespace ego_planner
         odom_pos_ = position;
         odom_orient_ = orientation;
         odom_vel_ = world_velocity;
+        last_odom_pos_ = position;
+        last_odom_stamp_ = stamp;
+        last_odom_time_ = node_->now();
 
         // odom_acc_ = estimateAcc( msg );
 
         have_odom_ = true;
+    }
+
+    bool EGOReplanFSM::odometryFresh() const
+    {
+        if (!have_odom_) return false;
+        const double age = (node_->now() - last_odom_time_).seconds();
+        return std::isfinite(age) && age >= -0.05 && age <= odom_timeout_sec_;
     }
 
     void EGOReplanFSM::BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline>& msg)
@@ -547,6 +629,21 @@ namespace ego_planner
             fsm_num = 0;
         }
 
+        if (!odometryFresh())
+        {
+            RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                  "Odometry timeout; holding the last accepted position and suspending planning");
+            if (exec_state_ == EXEC_TRAJ || exec_state_ == REPLAN_TRAJ)
+            {
+                flag_escape_emergency_ = true;
+                changeFSMExecState(EMERGENCY_STOP, "ODOM_STALE");
+            }
+            else if (exec_state_ == GEN_NEW_TRAJ)
+            {
+                goto force_return;
+            }
+        }
+
         switch (exec_state_)
         {
         case INIT:
@@ -715,7 +812,7 @@ namespace ego_planner
                 }
                 else
                 {
-                    if (enable_fail_safe_ && odom_vel_.norm() < 0.1)
+                    if (enable_fail_safe_ && odometryFresh() && odom_vel_.norm() < 0.1)
                         changeFSMExecState(GEN_NEW_TRAJ, "FSM");
                 }
 
@@ -1021,9 +1118,21 @@ namespace ego_planner
 
     void EGOReplanFSM::getLocalTarget()
     {
+        const double max_vel = planner_manager_->pp_.max_vel_;
+        if (!std::isfinite(planning_horizen_) || planning_horizen_ <= 0.0 ||
+            !std::isfinite(max_vel) || max_vel <= 0.0 ||
+            !std::isfinite(planner_manager_->global_data_.global_duration_) ||
+            planner_manager_->global_data_.global_duration_ <= 0.0)
+        {
+            RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                  "Cannot select local target: invalid horizon, speed, or global trajectory duration");
+            local_target_pt_ = end_pt_;
+            local_target_vel_.setZero();
+            return;
+        }
         double t;
 
-        double t_step = planning_horizen_ / 20 / planner_manager_->pp_.max_vel_;
+        double t_step = planning_horizen_ / 20 / max_vel;
         double dist_min = 9999, dist_min_t = 0.0;
         for (t = planner_manager_->global_data_.last_progress_time_; t < planner_manager_->global_data_.global_duration_
              ; t += t_step)

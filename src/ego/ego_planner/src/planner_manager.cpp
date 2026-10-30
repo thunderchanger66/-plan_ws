@@ -2,6 +2,9 @@
 #include <memory>
 #include <memory>
 #include <thread>
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
 #include "visualization_msgs/msg/marker.hpp" // zx-todo
 
 namespace ego_planner
@@ -31,6 +34,18 @@ namespace ego_planner
         node->get_parameter("manager/use_distinctive_trajs", pp_.use_distinctive_trajs);
         node->get_parameter("manager/drone_id", pp_.drone_id);
 
+        if (!std::isfinite(pp_.max_vel_) || pp_.max_vel_ <= 0.0 ||
+            !std::isfinite(pp_.max_acc_) || pp_.max_acc_ <= 0.0 ||
+            !std::isfinite(pp_.max_jerk_) || pp_.max_jerk_ <= 0.0 ||
+            !std::isfinite(pp_.ctrl_pt_dist) || pp_.ctrl_pt_dist <= 0.0 ||
+            !std::isfinite(pp_.planning_horizen_) || pp_.planning_horizen_ <= 0.0 ||
+            !std::isfinite(pp_.feasibility_tolerance_) || pp_.feasibility_tolerance_ < 0.0)
+        {
+            RCLCPP_FATAL(node->get_logger(),
+                         "Invalid EGO manager limits: max_vel, max_acc, max_jerk, control-point distance, and horizon must be positive");
+            throw std::invalid_argument("invalid EGO manager parameters");
+        }
+
         local_data_.traj_id_ = 0;
         grid_map_ = std::make_shared<GridMap>();
         // grid_map_->initMap(nh);
@@ -51,6 +66,13 @@ namespace ego_planner
                                           Eigen::Vector3d local_target_vel, bool flag_polyInit,
                                           bool flag_randomPolyTraj)
     {
+        if (!start_pt.allFinite() || !local_target_pt.allFinite() ||
+            !grid_map_->isInMap(start_pt) || !grid_map_->isInMap(local_target_pt))
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("EGOPlannerManager"),
+                         "Rejecting plan: start or local goal is outside the configured occupancy-map bounds");
+            return false;
+        }
         static int count = 0;
         printf("\033[47;30m\n[drone %d replan %d]==============================================\033[0m\n", pp_.drone_id,
                count++);
@@ -421,6 +443,18 @@ namespace ego_planner
                                                     const std::vector<Eigen::Vector3d>& waypoints,
                                                     const Eigen::Vector3d& end_vel, const Eigen::Vector3d& end_acc)
     {
+        if (waypoints.empty() || !start_pos.allFinite() || !start_vel.allFinite() || !start_acc.allFinite() ||
+            !end_vel.allFinite() || !end_acc.allFinite() ||
+            !std::all_of(waypoints.begin(), waypoints.end(),
+                         [this](const Eigen::Vector3d& point) {
+                             return point.allFinite() && (!grid_map_ || grid_map_->isInMap(point));
+                         }) ||
+            !std::isfinite(pp_.max_vel_) || pp_.max_vel_ <= 0.0)
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("EGOPlannerManager"),
+                         "Rejecting global waypoint trajectory with empty/non-finite input or invalid speed limit");
+            return false;
+        }
         // generate global reference trajectory
 
         vector<Eigen::Vector3d> points;
@@ -471,6 +505,12 @@ namespace ego_planner
         for (int i = 0; i < pt_num - 1; ++i)
         {
             time(i) = (pos.col(i + 1) - pos.col(i)).norm() / (pp_.max_vel_);
+            if (!std::isfinite(time(i)) || time(i) <= 1e-6)
+            {
+                RCLCPP_ERROR(rclcpp::get_logger("EGOPlannerManager"),
+                             "Rejecting global waypoint trajectory with coincident consecutive points");
+                return false;
+            }
         }
 
         time(0) *= 2.0;
@@ -497,6 +537,16 @@ namespace ego_planner
                                            const Eigen::Vector3d& end_pos, const Eigen::Vector3d& end_vel,
                                            const Eigen::Vector3d& end_acc)
     {
+        if (!start_pos.allFinite() || !start_vel.allFinite() || !start_acc.allFinite() ||
+            !end_pos.allFinite() || !end_vel.allFinite() || !end_acc.allFinite() ||
+            !std::isfinite(pp_.max_vel_) || pp_.max_vel_ <= 0.0 ||
+            (end_pos - start_pos).norm() <= 1e-6 ||
+            (grid_map_ && (!grid_map_->isInMap(start_pos) || !grid_map_->isInMap(end_pos))))
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("EGOPlannerManager"),
+                         "Rejecting global trajectory with non-finite state, invalid speed, or map-outside endpoint");
+            return false;
+        }
         // generate global reference trajectory
 
         vector<Eigen::Vector3d> points;

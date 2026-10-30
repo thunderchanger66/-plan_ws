@@ -53,6 +53,9 @@ namespace ego_planner
         int target_type_; // 1 mannual select, 2 hard code
         double no_replan_thresh_, replan_thresh_, goal_tolerance_;
         double replan_retry_interval_{0.25};
+        double odom_timeout_sec_{0.5};
+        double odom_max_speed_mps_{5.0};
+        double odom_position_jump_slack_m_{0.35};
         double waypoints_[50][3];
         int waypoint_num_, wp_id_;
         bool replan_from_odom_{false};
@@ -68,6 +71,9 @@ namespace ego_planner
 
         Eigen::Vector3d odom_pos_, odom_vel_, odom_acc_; // odometry state
         Eigen::Quaterniond odom_orient_;
+        Eigen::Vector3d last_odom_pos_;
+        rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};
+        rclcpp::Time last_odom_time_{0, 0, RCL_ROS_TIME};
 
         Eigen::Vector3d init_pt_, start_pt_, start_vel_, start_acc_, start_yaw_; // start state
         Eigen::Vector3d end_pt_, end_vel_; // goal state
@@ -118,6 +124,7 @@ namespace ego_planner
         void BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline>& msg);
 
         bool checkCollision();
+        bool odometryFresh() const;
         void publishSwarmTrajs(bool startup_pub);
 
     public:

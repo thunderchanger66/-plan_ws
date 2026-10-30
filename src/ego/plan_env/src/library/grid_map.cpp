@@ -1,4 +1,6 @@
 #include <utility>
+#include <limits>
+#include <stdexcept>
 
 #include "plan_env/grid_map.h"
 
@@ -86,6 +88,37 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
     node_->get_parameter("grid_map/ground_height", mp_.ground_height_);
     node_->get_parameter("grid_map/odom_depth_timeout", mp_.odom_depth_timeout_);
     node_->get_parameter("grid_map/cloud_voxel_retention_sec", mp_.cloud_voxel_retention_sec_);
+    if (!std::isfinite(mp_.resolution_) || mp_.resolution_ <= 0.0 ||
+        !std::isfinite(x_size) || !std::isfinite(y_size) || !std::isfinite(z_size) ||
+        x_size <= 0.0 || y_size <= 0.0 || z_size <= 0.0)
+    {
+        RCLCPP_FATAL(node_->get_logger(),
+                     "grid_map resolution and map sizes must be finite and positive");
+        throw std::invalid_argument("invalid EGO grid map geometry");
+    }
+    if (!std::isfinite(mp_.p_hit_) || mp_.p_hit_ <= 0.0 || mp_.p_hit_ >= 1.0 ||
+        !std::isfinite(mp_.p_miss_) || mp_.p_miss_ <= 0.0 || mp_.p_miss_ >= 1.0 ||
+        !std::isfinite(mp_.p_min_) || !std::isfinite(mp_.p_max_) || !std::isfinite(mp_.p_occ_) ||
+        mp_.p_min_ <= 0.0 || mp_.p_min_ >= mp_.p_occ_ || mp_.p_occ_ >= mp_.p_max_ || mp_.p_max_ >= 1.0)
+    {
+        RCLCPP_FATAL(node_->get_logger(), "grid_map occupancy probabilities must satisfy 0 < p_min < p_occ < p_max < 1");
+        throw std::invalid_argument("invalid EGO occupancy probabilities");
+    }
+    if (mp_.skip_pixel_ < 1) mp_.skip_pixel_ = 1;
+    if (mp_.depth_filter_margin_ < 0) mp_.depth_filter_margin_ = 0;
+    if (!std::isfinite(mp_.min_ray_length_) || !std::isfinite(mp_.max_ray_length_) ||
+        mp_.min_ray_length_ < 0.0 || mp_.max_ray_length_ <= mp_.min_ray_length_)
+    {
+        RCLCPP_FATAL(node_->get_logger(), "grid_map ray lengths must satisfy 0 <= min < max");
+        throw std::invalid_argument("invalid EGO depth ray lengths");
+    }
+    if (!std::isfinite(mp_.fx_) || mp_.fx_ <= 0.0 || !std::isfinite(mp_.fy_) || mp_.fy_ <= 0.0 ||
+        !std::isfinite(mp_.k_depth_scaling_factor_) || mp_.k_depth_scaling_factor_ <= 0.0)
+    {
+        RCLCPP_WARN(node_->get_logger(),
+                    "Invalid depth camera parameters; depth fusion will be disabled");
+        mp_.use_depth_filter_ = false;
+    }
     if (!std::isfinite(mp_.cloud_voxel_retention_sec_) ||
         mp_.cloud_voxel_retention_sec_ < 0.5 || mp_.cloud_voxel_retention_sec_ > 60.0)
     {
@@ -116,15 +149,26 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
     cout << "max: " << mp_.clamp_max_log_ << endl;
     cout << "thresh log: " << mp_.min_occupancy_log_ << endl;
 
+    size_t voxel_count = 1;
     for (int i = 0; i < 3; ++i)
-        mp_.map_voxel_num_(i) = ceil(mp_.map_size_(i) / mp_.resolution_);
+    {
+        const double voxel_dim = std::ceil(mp_.map_size_(i) / mp_.resolution_);
+        if (!std::isfinite(voxel_dim) || voxel_dim < 1.0 ||
+            voxel_dim > static_cast<double>(std::numeric_limits<int>::max()))
+            throw std::invalid_argument("EGO grid map voxel dimension is out of range");
+        mp_.map_voxel_num_(i) = static_cast<int>(voxel_dim);
+        if (voxel_count > static_cast<size_t>(std::numeric_limits<int>::max()) /
+                              static_cast<size_t>(mp_.map_voxel_num_(i)))
+            throw std::invalid_argument("EGO grid map voxel count exceeds supported buffer size");
+        voxel_count *= static_cast<size_t>(mp_.map_voxel_num_(i));
+    }
 
     mp_.map_min_boundary_ = mp_.map_origin_;
     mp_.map_max_boundary_ = mp_.map_origin_ + mp_.map_size_;
 
     // initialize data buffers
 
-    int buffer_size = mp_.map_voxel_num_(0) * mp_.map_voxel_num_(1) * mp_.map_voxel_num_(2);
+    const int buffer_size = static_cast<int>(voxel_count);
 
     md_.occupancy_buffer_ = vector<double>(buffer_size, mp_.clamp_min_log_ - mp_.unknown_flag_);
     md_.occupancy_buffer_inflate_ = vector<char>(buffer_size, 0);
@@ -137,6 +181,8 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
 
     md_.raycast_num_ = 0;
 
+    // Depth images may be any supported resolution. Reserve the common camera
+    // size, then grow to the actual frame before projecting to avoid overflow.
     md_.proj_points_.resize(640 * 480 / mp_.skip_pixel_ / mp_.skip_pixel_);
     md_.proj_points_cnt = 0;
 
@@ -282,6 +328,16 @@ void GridMap::projectDepthImage()
     int rows = md_.depth_image_.rows;
     int skip_pix = mp_.skip_pixel_;
 
+    if (rows <= 0 || cols <= 0 || skip_pix < 1 || md_.depth_image_.type() != CV_16UC1 ||
+        !std::isfinite(mp_.fx_) || mp_.fx_ <= 0.0 || !std::isfinite(mp_.fy_) || mp_.fy_ <= 0.0 ||
+        !std::isfinite(mp_.k_depth_scaling_factor_) || mp_.k_depth_scaling_factor_ <= 0.0)
+        return;
+
+    const size_t max_points = static_cast<size_t>((rows + skip_pix - 1) / skip_pix) *
+                              static_cast<size_t>((cols + skip_pix - 1) / skip_pix);
+    if (md_.proj_points_.size() < max_points)
+        md_.proj_points_.resize(max_points);
+
     double depth;
 
     Eigen::Matrix3d camera_r = md_.camera_r_m_;
@@ -295,7 +351,8 @@ void GridMap::projectDepthImage()
             for (int u = 0; u < cols; u += skip_pix)
             {
                 Eigen::Vector3d proj_pt;
-                depth = (*row_ptr++) / mp_.k_depth_scaling_factor_;
+                depth = (*row_ptr) / mp_.k_depth_scaling_factor_;
+                row_ptr += skip_pix;
                 proj_pt(0) = (u - mp_.cx_) * depth / mp_.fx_;
                 proj_pt(1) = (v - mp_.cy_) * depth / mp_.fy_;
                 proj_pt(2) = depth;
@@ -304,7 +361,8 @@ void GridMap::projectDepthImage()
 
                 if (u == 320 && v == 240)
                     std::cout << "depth: " << depth << std::endl;
-                md_.proj_points_[md_.proj_points_cnt++] = proj_pt;
+                if (md_.proj_points_cnt < static_cast<int>(md_.proj_points_.size()))
+                    md_.proj_points_[md_.proj_points_cnt++] = proj_pt;
             }
         }
     }
@@ -328,14 +386,15 @@ void GridMap::projectDepthImage()
                 for (int u = mp_.depth_filter_margin_; u < cols - mp_.depth_filter_margin_;
                      u += mp_.skip_pixel_)
                 {
-                    depth = (*row_ptr) * inv_factor;
+                    const uint16_t raw_depth = *row_ptr;
                     row_ptr = row_ptr + mp_.skip_pixel_;
+                    depth = raw_depth * inv_factor;
 
                     // filter depth
                     // depth += rand_noise_(eng_);
                     // if (depth > 0.01) depth += rand_noise2_(eng_);
 
-                    if (*row_ptr == 0)
+                    if (raw_depth == 0)
                     {
                         depth = mp_.max_ray_length_ + 0.1;
                     }
@@ -358,7 +417,9 @@ void GridMap::projectDepthImage()
                     //   pt_world = closetPointInMap(pt_world, md_.camera_pos_);
                     // }
 
-                    md_.proj_points_[md_.proj_points_cnt++] = pt_world;
+                    if (md_.proj_points_cnt < static_cast<int>(md_.proj_points_.size()))
+                                if (md_.proj_points_cnt < static_cast<int>(md_.proj_points_.size()))
+                                    md_.proj_points_[md_.proj_points_cnt++] = pt_world;
 
                     // check consistency with last image, disabled...
                     if (false)
@@ -372,12 +433,14 @@ void GridMap::projectDepthImage()
                             if (fabs(md_.last_depth_image_.at<uint16_t>((int)vv, (int)uu) * inv_factor -
                                 pt_reproj.z()) < mp_.depth_filter_tolerance_)
                             {
-                                md_.proj_points_[md_.proj_points_cnt++] = pt_world;
+                    if (md_.proj_points_cnt < static_cast<int>(md_.proj_points_.size()))
+                        md_.proj_points_[md_.proj_points_cnt++] = pt_world;
                             }
                         }
                         else
                         {
-                            md_.proj_points_[md_.proj_points_cnt++] = pt_world;
+                            if (md_.proj_points_cnt < static_cast<int>(md_.proj_points_.size()))
+                                md_.proj_points_[md_.proj_points_cnt++] = pt_world;
                         }
                     }
                 }
@@ -765,6 +828,13 @@ void GridMap::updateOccupancyCallback()
 void GridMap::depthPoseCallback(const sensor_msgs::msg::Image::ConstPtr& img,
                                 const geometry_msgs::msg::PoseStamped::ConstPtr& pose)
 {
+    if (img->encoding != sensor_msgs::image_encodings::TYPE_32FC1 &&
+        img->encoding != sensor_msgs::image_encodings::TYPE_16UC1)
+    {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                             "Ignoring unsupported depth encoding '%s'", img->encoding.c_str());
+        return;
+    }
     /* get depth image */
     cv_bridge::CvImagePtr cv_ptr;
     cv_ptr = cv_bridge::toCvCopy(img, img->encoding);
@@ -1054,6 +1124,13 @@ void GridMap::extrinsicCallback(const nav_msgs::msg::Odometry::ConstPtr& odom)
 void GridMap::depthOdomCallback(const sensor_msgs::msg::Image::ConstPtr& img,
                                 const nav_msgs::msg::Odometry::ConstPtr& odom)
 {
+    if (img->encoding != sensor_msgs::image_encodings::TYPE_32FC1 &&
+        img->encoding != sensor_msgs::image_encodings::TYPE_16UC1)
+    {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                             "Ignoring unsupported depth encoding '%s'", img->encoding.c_str());
+        return;
+    }
     /* get pose */
     Eigen::Quaterniond body_q = Eigen::Quaterniond(odom->pose.pose.orientation.w,
                                                    odom->pose.pose.orientation.x,
