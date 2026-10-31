@@ -91,6 +91,7 @@ namespace ego_planner
 
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr waypoint_sub_;
         rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+        rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr emergency_sub_;
         rclcpp::Subscription<traj_utils::msg::MultiBsplines>::SharedPtr swarm_trajs_sub_;
         rclcpp::Subscription<traj_utils::msg::Bspline>::SharedPtr broadcast_bspline_sub_;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr trigger_sub_;
@@ -122,6 +123,7 @@ namespace ego_planner
         void waypointCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped>& msg);
         void triggerCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped>& msg);
         void odometryCallback(const std::shared_ptr<const nav_msgs::msg::Odometry>& msg);
+        void externalEmergencyCallback(const std::shared_ptr<const std_msgs::msg::Empty>& msg);
         void swarmTrajsCallback(const std::shared_ptr<const traj_utils::msg::MultiBsplines>& msg);
         void BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline>& msg);
 

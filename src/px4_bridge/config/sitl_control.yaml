@@ -17,7 +17,11 @@ px4_bridge:
     publish_rate_hz: 20.0
     max_command_age_sec: 0.5
     planner_watchdog_timeout_sec: 0.5
-    max_abs_position_m: 10.0
+    # PX4 NED setpoint bounds derived from the 80 x 80 x 4 m EGO map
+    # (planner [-40, 40] x/y, [-0.01, 3.99] z) and the configured
+    # lidar-to-NED axis swap/sign flip, with 0.5 m numerical margin.
+    position_min_m: [-40.5, -40.5, -4.5]
+    position_max_m: [40.5, 40.5, 0.5]
     max_velocity_mps: 5.0
     max_acceleration_mps2: 10.0
     max_yaw_rate_rps: 3.0

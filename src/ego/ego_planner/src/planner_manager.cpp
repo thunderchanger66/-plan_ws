@@ -393,11 +393,12 @@ namespace ego_planner
         for (double t = 0.0; t <= final_duration + 1e-6; t += sample_step)
         {
             const Eigen::Vector3d sample = pos.evaluateDeBoorT(std::min(t, final_duration));
-            if (!sample.allFinite() || grid_map_->getInflateOccupancy(sample) != 0)
+            const int occupancy = sample.allFinite() ? grid_map_->getInflateOccupancy(sample) : -1;
+            if (occupancy != 0)
             {
                 RCLCPP_WARN(rclcpp::get_logger("EGOPlannerManager"),
-                            "Rejecting final trajectory: sample %.3f s is outside or inside inflated occupancy",
-                            t);
+                            "Rejecting final trajectory: sample %.3f s is %s",
+                            t, occupancy < 0 ? "outside the occupancy map" : "inside inflated occupancy");
                 continous_failures_count_++;
                 return false;
             }

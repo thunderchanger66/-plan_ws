@@ -25,6 +25,8 @@ def generate_launch_description():
     max_vel = LaunchConfiguration('max_vel', default=2.0)
     max_acc = LaunchConfiguration('max_acc', default=3.0)
     planning_horizon = LaunchConfiguration('planning_horizon', default=7.5)
+    obstacle_inflation = LaunchConfiguration('obstacle_inflation', default=0.45)
+    collision_clearance = LaunchConfiguration('collision_clearance', default=0.65)
     
     point_num = LaunchConfiguration('point_num', default=1)
     point0_x = LaunchConfiguration('point0_x', default=0.0)
@@ -65,6 +67,12 @@ def generate_launch_description():
     max_vel_arg = DeclareLaunchArgument('max_vel', default_value=max_vel, description='Maximum velocity')
     max_acc_arg = DeclareLaunchArgument('max_acc', default_value=max_acc, description='Maximum acceleration')
     planning_horizon_arg = DeclareLaunchArgument('planning_horizon', default_value=planning_horizon, description='Planning horizon')
+    obstacle_inflation_arg = DeclareLaunchArgument(
+        'obstacle_inflation', default_value=obstacle_inflation,
+        description='Inflated obstacle radius in metres')
+    collision_clearance_arg = DeclareLaunchArgument(
+        'collision_clearance', default_value=collision_clearance,
+        description='Optimizer collision clearance in metres')
     
     point_num_arg = DeclareLaunchArgument('point_num', default_value=point_num, description='Number of waypoints')
     point0_x_arg = DeclareLaunchArgument('point0_x', default_value=point0_x, description='Waypoint 0 X coordinate')
@@ -124,7 +132,7 @@ def generate_launch_description():
             {'fsm/flight_type': flight_type},
             {'fsm/thresh_replan_time': 1.0},
             {'fsm/thresh_no_replan_meter': 1.0},
-            {'fsm/goal_tolerance_m': 0.05},
+            {'fsm/goal_tolerance_m': 0.15},
             {'fsm/replan_retry_interval': 0.25},
             {'fsm/planning_horizon': planning_horizon},
             {'fsm/planning_horizen_time': 3.0},
@@ -156,7 +164,9 @@ def generate_launch_description():
             {'grid_map/local_update_range_x': 10.0},
             {'grid_map/local_update_range_y': 10.0},
             {'grid_map/local_update_range_z': 3.0},
-            {'grid_map/obstacles_inflation': 0.19},
+            # 0.45 m covers the X500 footprint, LiDAR/map quantization, and
+            # residual PX4 tracking error at the reduced simulation speed.
+            {'grid_map/obstacles_inflation': obstacle_inflation},
             # Keep the LiDAR hit map stable across sparse world-cloud scans.
             {'grid_map/cloud_voxel_retention_sec': 4.0},
             {'grid_map/local_map_margin': 10},
@@ -199,11 +209,11 @@ def generate_launch_description():
             {'manager/drone_id': drone_id},
             # Trajectory optimization parameters
             {'optimization/lambda_smooth': 1.0},
-            {'optimization/lambda_collision': 0.5},
+            {'optimization/lambda_collision': 1.0},
             {'optimization/lambda_feasibility': 0.1},
             {'optimization/lambda_fitness': 1.0},
-            {'optimization/dist0': 0.5},
-            {'optimization/swarm_clearance': 0.5},
+            {'optimization/dist0': collision_clearance},
+            {'optimization/swarm_clearance': collision_clearance},
             {'optimization/max_vel': max_vel},
             {'optimization/max_acc': max_acc},
 
@@ -237,6 +247,8 @@ def generate_launch_description():
     ld.add_action(max_vel_arg)
     ld.add_action(max_acc_arg)
     ld.add_action(planning_horizon_arg)
+    ld.add_action(obstacle_inflation_arg)
+    ld.add_action(collision_clearance_arg)
     
     ld.add_action(point_num_arg)
     ld.add_action(point0_x_arg)

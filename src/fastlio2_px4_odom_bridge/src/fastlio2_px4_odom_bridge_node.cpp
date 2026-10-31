@@ -12,6 +12,7 @@
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/empty.hpp>
 
 namespace
 {
@@ -38,6 +39,7 @@ public:
     declare_parameter("input_topic", "/fastlio2/lio_odom");
     declare_parameter("output_topic", "/fmu/in/vehicle_visual_odometry");
     declare_parameter("px4_local_position_topic", "/fmu/out/vehicle_local_position_v1");
+    declare_parameter("emergency_stop_topic", "/planning/emergency_stop");
     declare_parameter("input_frame", "lidar");
     declare_parameter("reject_frame_mismatch", true);
     declare_parameter("position_variance_floor", 0.01);
@@ -101,6 +103,8 @@ public:
       std::bind(&Fastlio2Px4OdomBridge::odom_callback, this, std::placeholders::_1));
     odom_pub_ = create_publisher<px4_msgs::msg::VehicleOdometry>(
       get_parameter("output_topic").as_string(), qos);
+    emergency_pub_ = create_publisher<std_msgs::msg::Empty>(
+      get_parameter("emergency_stop_topic").as_string(), rclcpp::QoS(10));
     local_position_sub_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
       get_parameter("px4_local_position_topic").as_string(), qos,
       [this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
@@ -285,8 +289,9 @@ private:
   void latch_fault(const std::string & reason)
   {
     fault_latched_ = true;
+    emergency_pub_->publish(std_msgs::msg::Empty{});
     RCLCPP_ERROR(get_logger(),
-      "External odometry disabled: %s. Restart this bridge only after FAST-LIO is healthy.",
+      "External odometry disabled and emergency stop requested: %s. Restart this bridge only after FAST-LIO is healthy.",
       reason.c_str());
   }
 
@@ -314,6 +319,7 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_position_sub_;
   rclcpp::Publisher<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr emergency_pub_;
   uint64_t px4_timestamp_us_{0};
 };
 

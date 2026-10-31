@@ -3,6 +3,22 @@
 
 namespace ego_planner
 {
+    namespace
+    {
+        // AStar owns a fixed 100^3 node pool. Keep every search segment well
+        // inside that pool instead of allowing long local segments to produce
+        // an endpoint at index 100 and turning a valid replan into a safety
+        // stop. The 0.1 m floor preserves the map resolution for short paths.
+        double safeAStarStep(const Eigen::Vector3d& start, const Eigen::Vector3d& end)
+        {
+            const Eigen::Vector3d delta = (start - end).cwiseAbs();
+            const double max_axis = delta.maxCoeff();
+            if (!std::isfinite(max_axis) || max_axis <= 0.0)
+                return 0.1;
+            return std::max(0.1, max_axis / 70.0);
+        }
+    }
+
     void BsplineOptimizer::setParam(rclcpp::Node::SharedPtr node)
     {
         clock_ = node->get_clock();
@@ -600,7 +616,7 @@ namespace ego_planner
         {
             // cout << "in=" << in.transpose() << " out=" << out.transpose() << endl;
             Eigen::Vector3d in(init_points.col(segment_ids[i].first)), out(init_points.col(segment_ids[i].second));
-            if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1, in, out))
+            if (a_star_->AstarSearch(safeAStarStep(in, out), in, out))
             {
                 a_star_pathes.push_back(a_star_->getPath());
             }
@@ -1423,15 +1439,16 @@ namespace ego_planner
             {
                 /*** a star search ***/
                 Eigen::Vector3d in(cps_.points.col(segment_ids[i].first)), out(cps_.points.col(segment_ids[i].second));
-                if (a_star_->AstarSearch(/*(in-out).norm()/10+0.05*/ 0.1, in, out))
+                if (a_star_->AstarSearch(safeAStarStep(in, out), in, out))
                 {
                     a_star_pathes.push_back(a_star_->getPath());
                 }
                 else
                 {
-                    RCLCPP_ERROR(rclcpp::get_logger("check_collision_and_rebound"), "a star error");
-                    segment_ids.erase(segment_ids.begin() + i);
-                    i--;
+                    RCLCPP_ERROR(rclcpp::get_logger("check_collision_and_rebound"),
+                                 "A* failed for a collision segment; rejecting the trajectory instead of optimizing through it");
+                    force_stop_type_ = STOP_FOR_ERROR;
+                    return false;
                 }
             }
 

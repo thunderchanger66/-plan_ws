@@ -76,7 +76,11 @@ public:
     declare_parameter("publish_rate_hz", 20.0);
     declare_parameter("max_command_age_sec", 0.5);
     declare_parameter("planner_watchdog_timeout_sec", 0.5);
+    // Kept for compatibility with older parameter files. New deployments
+    // should use the PX4-frame per-axis bounds below.
     declare_parameter("max_abs_position_m", 10.0);
+    declare_parameter("position_min_m", std::vector<double>{});
+    declare_parameter("position_max_m", std::vector<double>{});
     declare_parameter("max_velocity_mps", 5.0);
     declare_parameter("max_acceleration_mps2", 10.0);
     declare_parameter("max_yaw_rate_rps", 3.0);
@@ -102,6 +106,27 @@ public:
     if (!std::isfinite(planner_watchdog_timeout_sec_) || planner_watchdog_timeout_sec_ <= 0.0)
       throw std::runtime_error("planner watchdog timeout must be positive");
     max_abs_position_m_ = get_parameter("max_abs_position_m").as_double();
+    const auto position_min = get_parameter("position_min_m").as_double_array();
+    const auto position_max = get_parameter("position_max_m").as_double_array();
+    if (position_min.empty() && position_max.empty()) {
+      if (!std::isfinite(max_abs_position_m_) || max_abs_position_m_ <= 0.0) {
+        throw std::runtime_error("max_abs_position_m must be positive when per-axis bounds are omitted");
+      }
+      position_min_ = {-max_abs_position_m_, -max_abs_position_m_, -max_abs_position_m_};
+      position_max_ = {max_abs_position_m_, max_abs_position_m_, max_abs_position_m_};
+    } else {
+      if (position_min.size() != 3 || position_max.size() != 3) {
+        throw std::runtime_error("position_min_m and position_max_m must each contain 3 values");
+      }
+      std::copy(position_min.begin(), position_min.end(), position_min_.begin());
+      std::copy(position_max.begin(), position_max.end(), position_max_.begin());
+      for (size_t i = 0; i < 3; ++i) {
+        if (!std::isfinite(position_min_[i]) || !std::isfinite(position_max_[i]) ||
+            position_min_[i] >= position_max_[i]) {
+          throw std::runtime_error("position bounds must be finite and min < max on every axis");
+        }
+      }
+    }
     max_velocity_mps_ = get_parameter("max_velocity_mps").as_double();
     max_acceleration_mps2_ = get_parameter("max_acceleration_mps2").as_double();
     max_yaw_rate_rps_ = get_parameter("max_yaw_rate_rps").as_double();
@@ -112,10 +137,19 @@ public:
       get_parameter("startup_takeoff_velocity_tolerance_mps").as_double();
     startup_takeoff_required_samples_ =
       get_parameter("startup_takeoff_stable_samples").as_int();
+    if (!std::isfinite(max_command_age_sec_) || max_command_age_sec_ <= 0.0 ||
+      !std::isfinite(prestream_seconds_) || prestream_seconds_ < 0.0 ||
+      !std::isfinite(max_velocity_mps_) || max_velocity_mps_ <= 0.0 ||
+      !std::isfinite(max_acceleration_mps2_) || max_acceleration_mps2_ <= 0.0 ||
+      !std::isfinite(max_yaw_rate_rps_) || max_yaw_rate_rps_ <= 0.0)
+    {
+      throw std::runtime_error("command age, prestream, velocity, acceleration, and yaw limits must be valid");
+    }
     if (!std::isfinite(startup_takeoff_altitude_m_) || startup_takeoff_altitude_m_ < 0.0 ||
       !std::isfinite(startup_takeoff_tolerance_m_) || startup_takeoff_tolerance_m_ <= 0.0 ||
       !std::isfinite(startup_takeoff_velocity_tolerance_mps_) ||
-      startup_takeoff_velocity_tolerance_mps_ <= 0.0 || startup_takeoff_duration_sec_ <= 0.0 ||
+      startup_takeoff_velocity_tolerance_mps_ <= 0.0 ||
+      !std::isfinite(startup_takeoff_duration_sec_) || startup_takeoff_duration_sec_ <= 0.0 ||
       startup_takeoff_required_samples_ < 1)
     {
       throw std::runtime_error("startup takeoff altitude and tolerance must be valid");
@@ -150,7 +184,11 @@ public:
     status_pub_ = create_publisher<std_msgs::msg::String>(
       get_parameter("status_topic").as_string(), rclcpp::QoS(10));
 
-    const double publish_rate = std::max(1.0, get_parameter("publish_rate_hz").as_double());
+    const double configured_publish_rate = get_parameter("publish_rate_hz").as_double();
+    if (!std::isfinite(configured_publish_rate) || configured_publish_rate <= 0.0) {
+      throw std::runtime_error("publish_rate_hz must be finite and positive");
+    }
+    const double publish_rate = std::max(1.0, configured_publish_rate);
     // PX4 OffboardControlMode is a communication watchdog, so it must be
     // published in real time. Do not attach this timer to Gazebo /clock:
     // rendering load, pausing, or a reduced real-time factor would otherwise
@@ -327,7 +365,9 @@ private:
       return;
     }
     const double age = static_cast<double>(now.nanoseconds() - stamp_ns) / 1e9;
-    if (age < -0.05 || age > max_command_age_sec_) {
+    // The planner command carries Gazebo sensor time. Permit a modest clock
+    // lead during startup; the watchdog still rejects genuinely old commands.
+    if (age < -1.0 || age > max_command_age_sec_) {
       std::ostringstream status;
       status << "rejected_stale_command:age_sec=" << age;
       publish_status(status.str());
@@ -366,11 +406,24 @@ private:
       const auto angular_velocity = rotate(rotation_, {0.0, 0.0, msg->yaw_dot});
       output.yaw_rate = angular_velocity[2];
     }
-    if (std::any_of(output.position.begin(), output.position.end(), [this](double value) {
-        return std::abs(value) > max_abs_position_m_;
-      }))
+    size_t out_of_bounds_axis = 0;
+    bool out_of_bounds = false;
+    for (size_t axis = 0; axis < output.position.size(); ++axis) {
+      if (output.position[axis] < position_min_[axis] || output.position[axis] > position_max_[axis]) {
+        out_of_bounds_axis = axis;
+        out_of_bounds = true;
+        break;
+      }
+    }
+    if (out_of_bounds)
     {
-      publish_status("rejected_position_out_of_configured_bounds");
+      static constexpr std::array<const char *, 3> axis_names{"x", "y", "z"};
+      std::ostringstream status;
+      status << "rejected_position_out_of_configured_bounds:axis=" << axis_names[out_of_bounds_axis]
+             << ":value=" << output.position[out_of_bounds_axis]
+             << ":range=[" << position_min_[out_of_bounds_axis] << ","
+             << position_max_[out_of_bounds_axis] << "]";
+      publish_status(status.str());
       return;
     }
     if (norm(output.velocity) > max_velocity_mps_) {
@@ -604,6 +657,8 @@ private:
   std::optional<uint32_t> last_trajectory_id_;
   std::optional<std::chrono::steady_clock::time_point> latest_command_time_;
   double max_abs_position_m_{10.0};
+  Vector3 position_min_{-10.0, -10.0, -10.0};
+  Vector3 position_max_{10.0, 10.0, 10.0};
   double max_velocity_mps_{5.0};
   double max_acceleration_mps2_{10.0};
   double max_yaw_rate_rps_{3.0};

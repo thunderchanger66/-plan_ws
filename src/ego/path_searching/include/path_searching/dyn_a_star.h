@@ -2,11 +2,13 @@
 #define DYN_A_STAR_H
 
 #include <iostream>
+#include <cmath>
+#include <limits>
 #include <rclcpp/rclcpp.hpp>
 #include <plan_env/grid_map.h>
 #include <queue>
 
-constexpr double inf = 1 >> 20;
+constexpr double inf = std::numeric_limits<double>::infinity();
 struct GridNode;
 typedef GridNode* GridNodePtr;
 
@@ -99,6 +101,8 @@ inline Eigen::Vector3d AStar::Index2Coord(const Eigen::Vector3i& index) const
 
 inline bool AStar::Coord2Index(const Eigen::Vector3d& pt, Eigen::Vector3i& idx) const
 {
+    if (!pt.allFinite() || !std::isfinite(step_size_) || step_size_ <= 0.0)
+        return false;
     idx = ((pt - center_) * inv_step_size_ + Eigen::Vector3d(0.5, 0.5, 0.5)).cast<int>() + CENTER_IDX_;
 
     if (idx(0) < 0 || idx(0) >= POOL_SIZE_(0) || idx(1) < 0 || idx(1) >= POOL_SIZE_(1) || idx(2) < 0 || idx(2) >=

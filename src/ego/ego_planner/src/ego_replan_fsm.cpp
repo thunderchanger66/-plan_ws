@@ -18,7 +18,7 @@ namespace ego_planner
         node_->declare_parameter("fsm/flight_type", -1);
         node_->declare_parameter("fsm/thresh_replan_time", -1.0);
         node_->declare_parameter("fsm/thresh_no_replan_meter", -1.0);
-        node_->declare_parameter("fsm/goal_tolerance_m", 0.05);
+        node_->declare_parameter("fsm/goal_tolerance_m", 0.15);
         node_->declare_parameter("fsm/replan_retry_interval", 0.25);
         node_->declare_parameter("fsm/odom_timeout_sec", 0.5);
         node_->declare_parameter("fsm/odom_max_speed_mps", 5.0);
@@ -168,6 +168,9 @@ namespace ego_planner
         bspline_pub_ = node_->create_publisher<traj_utils::msg::Bspline>("planning/bspline", 10);
         data_disp_pub_ = node_->create_publisher<traj_utils::msg::DataDisp>("planning/data_display", 100);
         emergency_pub_ = node_->create_publisher<std_msgs::msg::Empty>("/planning/emergency_stop", 10);
+        emergency_sub_ = node_->create_subscription<std_msgs::msg::Empty>(
+            "/planning/emergency_stop", 10,
+            std::bind(&EGOReplanFSM::externalEmergencyCallback, this, std::placeholders::_1));
 
         if (target_type_ == MANUAL_TARGET)
         {
@@ -381,7 +384,15 @@ namespace ego_planner
         const rclcpp::Time stamp(msg->header.stamp, node_->get_clock()->get_clock_type());
         const double age = (node_->now() - stamp).seconds();
         const double speed = child_velocity.norm();
-        if (stamp.nanoseconds() <= 0 || !std::isfinite(age) || age < -0.05 ||
+        // FAST-LIO stamps the scan at its simulated sensor end time.  During
+        // startup that time can lead the ROS executor clock by one or two
+        // sensor periods; rejecting it at 50 ms drops the first valid state
+        // and can leave the planner in WAIT_TARGET with no usable odometry.
+        // Sensor timestamps can lead /clock while Gazebo publishes a burst
+        // after startup. Freshness is checked from callback receipt time
+        // below; retain only a broad sanity bound for malformed clocks.
+        const double odom_future_tolerance = 1.0;
+        if (stamp.nanoseconds() <= 0 || !std::isfinite(age) || age < -odom_future_tolerance ||
             age > odom_timeout_sec_ || !std::isfinite(speed) || speed > odom_max_speed_mps_)
         {
             RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
@@ -424,11 +435,27 @@ namespace ego_planner
         have_odom_ = true;
     }
 
+    void EGOReplanFSM::externalEmergencyCallback(
+        const std::shared_ptr<const std_msgs::msg::Empty>&)
+    {
+        if (exec_state_ == EMERGENCY_STOP)
+            return;
+
+        RCLCPP_ERROR(node_->get_logger(), "External safety event received; latching EGO emergency stop");
+        have_target_ = false;
+        have_trigger_ = false;
+        enable_fail_safe_ = false;
+        flag_escape_emergency_ = true;
+        changeFSMExecState(EMERGENCY_STOP, "EXTERNAL_SAFETY_EVENT");
+    }
+
     bool EGOReplanFSM::odometryFresh() const
     {
         if (!have_odom_) return false;
         const double age = (node_->now() - last_odom_time_).seconds();
-        return std::isfinite(age) && age >= -0.05 && age <= odom_timeout_sec_;
+        // last_odom_time_ is recorded at callback receipt, so a sensor clock
+        // lead cannot make a valid stream look stale or trigger a false stop.
+        return std::isfinite(age) && age <= odom_timeout_sec_;
     }
 
     void EGOReplanFSM::BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline>& msg)
@@ -833,7 +860,26 @@ namespace ego_planner
                 else
                 {
                     if (enable_fail_safe_ && odometryFresh() && odom_vel_.norm() < 0.1)
-                        changeFSMExecState(GEN_NEW_TRAJ, "FSM");
+                    {
+                        const bool target_safe = have_target_ &&
+                            planner_manager_->grid_map_->isInMap(end_pt_) &&
+                            planner_manager_->grid_map_->getInflateOccupancy(end_pt_) == 0;
+                        if (target_safe)
+                        {
+                            RCLCPP_WARN(node_->get_logger(),
+                                        "Vehicle stopped after obstacle emergency; replanning from current odometry");
+                            replan_from_odom_ = true;
+                            changeFSMExecState(GEN_NEW_TRAJ, "SAFE_RECOVERY");
+                        }
+                        else
+                        {
+                            RCLCPP_ERROR(node_->get_logger(),
+                                         "Emergency recovery blocked because the active goal is occupied or outside the map");
+                            have_target_ = false;
+                            have_trigger_ = false;
+                            enable_fail_safe_ = false;
+                        }
+                    }
                 }
 
                 flag_escape_emergency_ = false;
@@ -918,8 +964,22 @@ namespace ego_planner
         LocalTrajData* info = &planner_manager_->local_data_;
         auto map = planner_manager_->grid_map_;
 
-        if (exec_state_ == WAIT_TARGET || info->start_time_.seconds() < 1e-5)
+        if (exec_state_ == WAIT_TARGET || exec_state_ == EMERGENCY_STOP ||
+            info->start_time_.seconds() < 1e-5)
             return;
+
+        if (have_target_ && planner_manager_->grid_map_->isInMap(end_pt_) &&
+            planner_manager_->grid_map_->getInflateOccupancy(end_pt_) != 0)
+        {
+            RCLCPP_ERROR(node_->get_logger(),
+                         "Active goal became occupied in the inflated map; stopping instead of replanning toward it");
+            have_target_ = false;
+            have_trigger_ = false;
+            enable_fail_safe_ = false;
+            flag_escape_emergency_ = true;
+            changeFSMExecState(EMERGENCY_STOP, "GOAL_OCCUPIED");
+            return;
+        }
 
         /* ---------- check lost of depth ---------- */
         if (map->getOdomDepthTimeout())
@@ -973,8 +1033,17 @@ namespace ego_planner
             if (occ)
             {
                 if (node_->now() < next_plan_attempt_)
-                    break;
-                if (planFromCurrentTraj()) // Make a chance
+                {
+                    RCLCPP_ERROR(node_->get_logger(),
+                                 "Occupied active trajectory detected during replan cooldown; stopping instead of executing it");
+                    // A failed obstacle replan is a latched safety event. Do not
+                    // auto-recover into the same goal after the vehicle stops.
+                    enable_fail_safe_ = false;
+                    flag_escape_emergency_ = true;
+                    changeFSMExecState(EMERGENCY_STOP, "SAFETY_COOLDOWN");
+                    return;
+                }
+                if (planFromCurrentTraj()) // Replace the unsafe trajectory only after validation succeeds.
                 {
                     next_plan_attempt_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
                     changeFSMExecState(EXEC_TRAJ, "SAFETY");
@@ -983,18 +1052,15 @@ namespace ego_planner
                 else
                 {
                     next_plan_attempt_ = node_->now() + rclcpp::Duration::from_seconds(replan_retry_interval_);
-                    if (t - t_cur < emergency_time_) // 0.8s of emergency time
-                    {
-                        RCLCPP_WARN(node_->get_logger(), "Suddenly discovered obstacles. emergency stop! time=%f",
-                                    t - t_cur);
-                        enable_fail_safe_ = false;
-                        changeFSMExecState(EMERGENCY_STOP, "SAFETY");
-                    }
-                    else
-                    {
-                        RCLCPP_WARN(node_->get_logger(), "current traj in collision, replan.");
-                        changeFSMExecState(REPLAN_TRAJ, "SAFETY");
-                    }
+                    RCLCPP_ERROR(node_->get_logger(),
+                                 "No collision-free replacement trajectory; stopping now (collision lookahead %.3f s)",
+                                 t - t_cur);
+                    // The active trajectory is unsafe and no replacement was
+                    // validated. Require a fresh goal before leaving hold.
+                    enable_fail_safe_ = false;
+                    flag_escape_emergency_ = true;
+                    changeFSMExecState(EMERGENCY_STOP, "SAFETY_REPLAN_FAILED");
+                    return;
                 }
                 break;
             }

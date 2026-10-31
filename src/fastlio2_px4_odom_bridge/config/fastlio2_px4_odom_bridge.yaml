@@ -3,6 +3,7 @@ fastlio2_px4_odom_bridge:
     use_sim_time: true
     input_topic: /fastlio2/lio_odom
     output_topic: /fmu/in/vehicle_visual_odometry
+    emergency_stop_topic: /planning/emergency_stop
     input_frame: lidar
     reject_frame_mismatch: true
     # Timestamp external odometry with PX4's own local-position clock.

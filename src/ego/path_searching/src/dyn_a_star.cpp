@@ -94,28 +94,58 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
     if (!Coord2Index(start_pt, start_idx) || !Coord2Index(end_pt, end_idx))
         return false;
 
+    // A collision segment can start well inside the inflated obstacle, so a
+    // fixed 0.5 m endpoint nudge is not enough for larger obstacles. Bound the
+    // adjustment by the actual remaining search-pool margin on every axis.
+    double pool_margin = std::numeric_limits<double>::infinity();
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const double endpoint_offset = std::abs(start_pt(axis) - center_(axis)) * inv_step_size_;
+        const double remaining_cells = POOL_SIZE_(axis) / 2.0 - endpoint_offset - 2.0;
+        pool_margin = std::min(pool_margin, remaining_cells * step_size_);
+    }
+    const double max_adjustment = std::min(2.0, pool_margin);
+    const auto move_to_free_endpoint = [&](Vector3d& point, const Vector3d& free_side,
+                                           Vector3i& index) {
+        // The search endpoint is embedded in the obstacle run. Move it away
+        // from the opposite endpoint so it exits the occupied interval on
+        // its own free side, rather than stepping farther into the obstacle.
+        const Vector3d origin = point;
+        Vector3d direction = point - free_side;
+        const double length = direction.norm();
+        if (!std::isfinite(length) || length < 1e-6 || !std::isfinite(max_adjustment) ||
+            max_adjustment < step_size_)
+            return false;
+        direction /= length;
+        for (double moved = step_size_; moved <= max_adjustment + 1e-9; moved += step_size_)
+        {
+            const Vector3d candidate = origin + direction * moved;
+            Vector3i candidate_index;
+            if (!Coord2Index(candidate, candidate_index))
+                return false;
+            if (!checkOccupancy(Index2Coord(candidate_index)))
+            {
+                point = candidate;
+                index = candidate_index;
+                return true;
+            }
+        }
+        RCLCPP_WARN(rclcpp::get_logger("AstarSearch"),
+                    "Occupied A* endpoint has no free voxel within %.2f m adjustment bound",
+                    max_adjustment);
+        return !checkOccupancy(Index2Coord(index));
+    };
+
     if (checkOccupancy(Index2Coord(start_idx)))
     {
-        // RCLCPP_WARN(rclcpp::get_logger("ConvertToIndexAndAdjustStartEndPoints"), "Start point is insdide an obstacle.");
-        do
-        {
-            start_pt = (start_pt - end_pt).normalized() * step_size_ + start_pt;
-            if (!Coord2Index(start_pt, start_idx))
-                return false;
-        }
-        while (checkOccupancy(Index2Coord(start_idx)));
+        if (!move_to_free_endpoint(start_pt, end_pt, start_idx))
+            return false;
     }
 
     if (checkOccupancy(Index2Coord(end_idx)))
     {
-        // RCLCPP_WARN(rclcpp::get_logger("ConvertToIndexAndAdjustStartEndPoints"), "End point is insdide an obstacle.");
-        do
-        {
-            end_pt = (end_pt - start_pt).normalized() * step_size_ + end_pt;
-            if (!Coord2Index(end_pt, end_idx))
-                return false;
-        }
-        while (checkOccupancy(Index2Coord(end_idx)));
+        if (!move_to_free_endpoint(end_pt, start_pt, end_idx))
+            return false;
     }
 
     return true;
@@ -204,6 +234,28 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
 
                     neighborPtr = GridNodeMap_[neighborIdx(0)][neighborIdx(1)][neighborIdx(2)];
                     neighborPtr->index = neighborIdx;
+
+                    // Disallow diagonal corner cutting: every proper
+                    // axis-aligned subset of this voxel transition must be
+                    // free before the diagonal edge is considered.
+                    bool corner_blocked = false;
+                    for (int mask = 1; mask < 8; ++mask)
+                    {
+                        if (mask == 7 || (dx == 0 && (mask & 1)) ||
+                            (dy == 0 && (mask & 2)) || (dz == 0 && (mask & 4)))
+                            continue;
+                        Vector3i intermediate = current->index;
+                        if (mask & 1) intermediate(0) += dx;
+                        if (mask & 2) intermediate(1) += dy;
+                        if (mask & 4) intermediate(2) += dz;
+                        if (checkOccupancy(Index2Coord(intermediate)))
+                        {
+                            corner_blocked = true;
+                            break;
+                        }
+                    }
+                    if (corner_blocked)
+                        continue;
 
                     bool flag_explored = neighborPtr->rounds == rounds_;
 
