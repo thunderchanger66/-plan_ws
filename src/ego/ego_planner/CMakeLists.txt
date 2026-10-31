@@ -15,6 +15,7 @@ find_package(ament_cmake REQUIRED)
 set(dependencies
         quadrotor_msgs
         bspline_opt
+        std_msgs
 )
 foreach (Dependency IN ITEMS ${dependencies})
     find_package(${Dependency} REQUIRED)

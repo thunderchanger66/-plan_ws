@@ -15,6 +15,7 @@
 #include "traj_utils/msg/multi_bsplines.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "traj_utils/msg/data_disp.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "ego_planner/planner_manager.h"
 #include "traj_utils/planning_visualization.h"
 
@@ -98,6 +99,7 @@ namespace ego_planner
         rclcpp::Publisher<traj_utils::msg::DataDisp>::SharedPtr data_disp_pub_;
         rclcpp::Publisher<traj_utils::msg::MultiBsplines>::SharedPtr swarm_trajs_pub_;
         rclcpp::Publisher<traj_utils::msg::Bspline>::SharedPtr broadcast_bspline_pub_;
+        rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr emergency_pub_;
 
         /* helper functions */
         bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method

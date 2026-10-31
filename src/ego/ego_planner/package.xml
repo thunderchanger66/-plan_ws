@@ -12,6 +12,7 @@
 
   <depend>quadrotor_msgs</depend>
   <depend>bspline_opt</depend>
+  <depend>std_msgs</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>tf2_ros</exec_depend>

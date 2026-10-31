@@ -23,6 +23,8 @@ rclcpp::Time start_time_;
 rclcpp::Clock::SharedPtr trajectory_clock_;
 std::string planning_frame_;
 int traj_id_{0};
+bool have_last_command_time_{false};
+rclcpp::Time last_command_time_;
 
 // yaw control
 double last_yaw_{0.0}, last_yaw_dot_{0.0};
@@ -50,6 +52,13 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
     if (msg->traj_id < 0 || msg->traj_id > std::numeric_limits<int>::max())
     {
         RCLCPP_WARN(rclcpp::get_logger("traj_server"), "Ignoring B-spline with out-of-range trajectory id");
+        return;
+    }
+    if (receive_traj_ && msg->traj_id <= traj_id_)
+    {
+        RCLCPP_DEBUG(rclcpp::get_logger("traj_server"),
+                     "Ignoring duplicate or out-of-order trajectory id %ld (current %d)",
+                     static_cast<long>(msg->traj_id), traj_id_);
         return;
     }
     for (size_t i = 0; i < msg->pos_pts.size(); ++i)
@@ -106,6 +115,8 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
     traj_duration_ = candidate_duration;
     start_time_ = candidate_start_time;
     traj_id_ = static_cast<int>(msg->traj_id);
+    have_last_command_time_ = false;
+    last_yaw_dot_ = 0.0;
 
     receive_traj_ = true;
     }
@@ -115,99 +126,25 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
     }
 }
 
-std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d& pos, rclcpp::Time& time_now,
-                                        rclcpp::Time& time_last)
+std::pair<double, double> calculate_yaw(double t_cur, const Eigen::Vector3d& pos, double dt)
 {
-    constexpr double PI = 3.1415926;
+    constexpr double PI = 3.14159265358979323846;
     constexpr double YAW_DOT_MAX_PER_SEC = PI;
-    // constexpr double YAW_DOT_DOT_MAX_PER_SEC = PI;
-    std::pair<double, double> yaw_yawdot(0, 0);
-    double yaw = 0;
-    double yawdot = 0;
-
     Eigen::Vector3d dir = t_cur + time_forward_ <= traj_duration_
                               ? traj_[0].evaluateDeBoorT(t_cur + time_forward_) - pos
                               : traj_[0].evaluateDeBoorT(traj_duration_) - pos;
-    double yaw_temp = std::hypot(dir(0), dir(1)) > 0.1 ? atan2(dir(1), dir(0)) : last_yaw_;
-    double max_yaw_change = YAW_DOT_MAX_PER_SEC * (time_now - time_last).seconds();
-    if (yaw_temp - last_yaw_ > PI)
-    {
-        if (yaw_temp - last_yaw_ - 2 * PI < -max_yaw_change)
-        {
-            yaw = last_yaw_ - max_yaw_change;
-            if (yaw < -PI)
-                yaw += 2 * PI;
-
-            yawdot = -YAW_DOT_MAX_PER_SEC;
-        }
-        else
-        {
-            yaw = yaw_temp;
-            if (yaw - last_yaw_ > PI)
-                yawdot = -YAW_DOT_MAX_PER_SEC;
-            else
-                yawdot = (yaw_temp - last_yaw_) / (time_now - time_last).seconds();
-        }
-    }
-    else if (yaw_temp - last_yaw_ < -PI)
-    {
-        if (yaw_temp - last_yaw_ + 2 * PI > max_yaw_change)
-        {
-            yaw = last_yaw_ + max_yaw_change;
-            if (yaw > PI)
-                yaw -= 2 * PI;
-
-            yawdot = YAW_DOT_MAX_PER_SEC;
-        }
-        else
-        {
-            yaw = yaw_temp;
-            if (yaw - last_yaw_ < -PI)
-                yawdot = YAW_DOT_MAX_PER_SEC;
-            else
-                yawdot = (yaw_temp - last_yaw_) / (time_now - time_last).seconds();
-        }
-    }
-    else
-    {
-        if (yaw_temp - last_yaw_ < -max_yaw_change)
-        {
-            yaw = last_yaw_ - max_yaw_change;
-            if (yaw < -PI)
-                yaw += 2 * PI;
-
-            yawdot = -YAW_DOT_MAX_PER_SEC;
-        }
-        else if (yaw_temp - last_yaw_ > max_yaw_change)
-        {
-            yaw = last_yaw_ + max_yaw_change;
-            if (yaw > PI)
-                yaw -= 2 * PI;
-
-            yawdot = YAW_DOT_MAX_PER_SEC;
-        }
-        else
-        {
-            yaw = yaw_temp;
-            if (yaw - last_yaw_ > PI)
-                yawdot = -YAW_DOT_MAX_PER_SEC;
-            else if (yaw - last_yaw_ < -PI)
-                yawdot = YAW_DOT_MAX_PER_SEC;
-            else
-                yawdot = (yaw_temp - last_yaw_) / (time_now - time_last).seconds();
-        }
-    }
-
-    if (fabs(yaw - last_yaw_) <= max_yaw_change)
-        yaw = 0.5 * last_yaw_ + 0.5 * yaw; // nieve LPF
-    yawdot = 0.5 * last_yaw_dot_ + 0.5 * yawdot;
+    const double desired_yaw = std::hypot(dir.x(), dir.y()) > 0.1 ?
+        std::atan2(dir.y(), dir.x()) : last_yaw_;
+    const double yaw_error = std::atan2(std::sin(desired_yaw - last_yaw_),
+                                        std::cos(desired_yaw - last_yaw_));
+    const double yaw_step = std::clamp(yaw_error, -YAW_DOT_MAX_PER_SEC * dt,
+                                       YAW_DOT_MAX_PER_SEC * dt);
+    const double yaw = std::atan2(std::sin(last_yaw_ + yaw_step),
+                                  std::cos(last_yaw_ + yaw_step));
+    const double yawdot = yaw_step / dt;
     last_yaw_ = yaw;
     last_yaw_dot_ = yawdot;
-
-    yaw_yawdot.first = yaw;
-    yaw_yawdot.second = yawdot;
-
-    return yaw_yawdot;
+    return {yaw, yawdot};
 }
 
 void cmdCallback()
@@ -223,14 +160,19 @@ void cmdCallback()
     Eigen::Vector3d pos(Eigen::Vector3d::Zero()), vel(Eigen::Vector3d::Zero()), acc(Eigen::Vector3d::Zero()), pos_f;
     std::pair<double, double> yaw_yawdot(0, 0);
 
-    static rclcpp::Time time_last = time_now;
-    if (time_now < time_last)
+    if (!have_last_command_time_)
     {
-        time_last = time_now;
+        last_command_time_ = time_now;
+        have_last_command_time_ = true;
+    }
+    if (time_now < last_command_time_)
+    {
+        last_command_time_ = time_now;
         last_yaw_dot_ = 0.0;
         return;
     }
-    if (time_now == time_last)
+    const double dt = (time_now - last_command_time_).seconds();
+    if (!std::isfinite(dt) || dt <= 0.0)
         return;
     if (t_cur < traj_duration_ && t_cur >= 0.0)
     {
@@ -239,7 +181,7 @@ void cmdCallback()
         acc = traj_[2].evaluateDeBoorT(t_cur);
 
         /*** calculate yaw ***/
-        yaw_yawdot = calculate_yaw(t_cur, pos, time_now, time_last);
+        yaw_yawdot = calculate_yaw(t_cur, pos, dt);
         /*** calculate yaw ***/
 
         double tf = min(traj_duration_, t_cur + 2.0);
@@ -260,10 +202,17 @@ void cmdCallback()
     else
     {
         // Do not publish a zero reference before the trajectory begins.
-        time_last = time_now;
+        last_command_time_ = time_now;
         return;
     }
-    time_last = time_now;
+    if (!pos.allFinite() || !vel.allFinite() || !acc.allFinite() || !pos_f.allFinite() ||
+        !std::isfinite(yaw_yawdot.first) || !std::isfinite(yaw_yawdot.second))
+    {
+        RCLCPP_ERROR_THROTTLE(rclcpp::get_logger("traj_server"), *trajectory_clock_, 2000,
+                              "Suppressing non-finite trajectory command");
+        return;
+    }
+    last_command_time_ = time_now;
 
     cmd.header.stamp = time_now;
     cmd.header.frame_id = planning_frame_;

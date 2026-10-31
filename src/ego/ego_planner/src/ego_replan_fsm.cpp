@@ -167,6 +167,7 @@ namespace ego_planner
 
         bspline_pub_ = node_->create_publisher<traj_utils::msg::Bspline>("planning/bspline", 10);
         data_disp_pub_ = node_->create_publisher<traj_utils::msg::DataDisp>("planning/data_display", 100);
+        emergency_pub_ = node_->create_publisher<std_msgs::msg::Empty>("/planning/emergency_stop", 10);
 
         if (target_type_ == MANUAL_TARGET)
         {
@@ -241,6 +242,15 @@ namespace ego_planner
 
     void EGOReplanFSM::planNextWaypoint(const Eigen::Vector3d next_wp)
     {
+        if (!next_wp.allFinite() || !planner_manager_->grid_map_->isInMap(next_wp) ||
+            planner_manager_->grid_map_->getInflateOccupancy(next_wp) != 0)
+        {
+            RCLCPP_ERROR(node_->get_logger(),
+                         "Rejecting unreachable waypoint inside/outside the inflated planning map: %.2f %.2f %.2f",
+                         next_wp.x(), next_wp.y(), next_wp.z());
+            have_target_ = false;
+            return;
+        }
         bool success = false;
         success = planner_manager_->planGlobalTraj(odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), next_wp,
                                                    Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
@@ -260,6 +270,7 @@ namespace ego_planner
             end_vel_.setZero();
             have_target_ = true;
             have_new_target_ = true;
+            enable_fail_safe_ = true;
 
             /*** FSM状态转换 ***/
             // This function can be called from a subscription/timer callback.
@@ -271,6 +282,8 @@ namespace ego_planner
             else if (exec_state_ == INIT || exec_state_ == WAIT_TARGET ||
                      exec_state_ == SEQUENTIAL_START)
                 changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
+            else if (exec_state_ == EMERGENCY_STOP)
+                changeFSMExecState(GEN_NEW_TRAJ, "NEW_GOAL");
 
             visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
         }
@@ -306,6 +319,13 @@ namespace ego_planner
         if (!end_wp.allFinite() || !planner_manager_->grid_map_->isInMap(end_wp))
         {
             RCLCPP_ERROR(node_->get_logger(), "Rejecting goal outside the configured occupancy-map bounds: %.2f %.2f %.2f",
+                         end_wp.x(), end_wp.y(), end_wp.z());
+            return;
+        }
+        if (planner_manager_->grid_map_->getInflateOccupancy(end_wp) != 0)
+        {
+            RCLCPP_ERROR(node_->get_logger(),
+                         "Rejecting goal inside an occupied or out-of-map inflated voxel: %.2f %.2f %.2f",
                          end_wp.x(), end_wp.y(), end_wp.z());
             return;
         }
@@ -862,6 +882,9 @@ namespace ego_planner
         auto time_now = node_->now();
         // double t_cur = (time_now - info->start_time_).toSec();
         double t_cur = (time_now - info->start_time_).seconds();
+        if (!std::isfinite(t_cur) || !std::isfinite(info->duration_) || info->duration_ <= 0.0)
+            return false;
+        t_cur = std::clamp(t_cur, 0.0, info->duration_);
 
         start_pt_ = info->position_traj_.evaluateDeBoorT(t_cur);
         start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
@@ -905,27 +928,23 @@ namespace ego_planner
 
             enable_fail_safe_ = false;
             changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+            return;
         }
 
         /* ---------- check trajectory ---------- */
         constexpr double time_step = 0.01;
         // double t_cur = (ros::Time::now() - info->start_time_).toSec();
         double t_cur = (node_->now() - info->start_time_).seconds();
+        if (!std::isfinite(t_cur) || !std::isfinite(info->duration_) || info->duration_ <= 0.0)
+            return;
+        t_cur = std::clamp(t_cur, 0.0, info->duration_);
 
-        Eigen::Vector3d p_cur = info->position_traj_.evaluateDeBoorT(t_cur);
         const double CLEARANCE = 1.0 * planner_manager_->getSwarmClearance();
-        // double t_cur_global = ros::Time::now().toSec();
-        double t_cur_global = node_->now().seconds();
 
-        double t_2_3 = info->duration_ * 2 / 3;
         for (double t = t_cur; t < info->duration_; t += time_step)
         {
-            if (t_cur < t_2_3 && t >= t_2_3)
-                // If t_cur < t_2_3, only the first 2/3 partition of the trajectory is considered valid and will get checked.
-                break;
-
-            bool occ = false;
-            occ |= map->getInflateOccupancy(info->position_traj_.evaluateDeBoorT(t));
+            const Eigen::Vector3d trajectory_point = info->position_traj_.evaluateDeBoorT(t);
+            bool occ = map->getInflateOccupancy(trajectory_point) != 0;
 
             for (size_t id = 0; id < planner_manager_->swarm_trajs_buf_.size(); id++)
             {
@@ -935,10 +954,14 @@ namespace ego_planner
                     continue;
                 }
 
-                double t_X = t_cur_global - planner_manager_->swarm_trajs_buf_.at(id).start_time_.seconds();
+                const double t_global = info->start_time_.seconds() + t;
+                double t_X = t_global - planner_manager_->swarm_trajs_buf_.at(id).start_time_.seconds();
+                const double other_duration = planner_manager_->swarm_trajs_buf_.at(id).duration_;
+                if (!std::isfinite(t_X) || !std::isfinite(other_duration) || t_X < 0.0 || t_X > other_duration)
+                    continue;
                 Eigen::Vector3d swarm_pridicted = planner_manager_->swarm_trajs_buf_.at(id).position_traj_.
                                                                     evaluateDeBoorT(t_X);
-                double dist = (p_cur - swarm_pridicted).norm();
+                double dist = (trajectory_point - swarm_pridicted).norm();
 
                 if (dist < CLEARANCE)
                 {
@@ -964,7 +987,7 @@ namespace ego_planner
                     {
                         RCLCPP_WARN(node_->get_logger(), "Suddenly discovered obstacles. emergency stop! time=%f",
                                     t - t_cur);
-
+                        enable_fail_safe_ = false;
                         changeFSMExecState(EMERGENCY_STOP, "SAFETY");
                     }
                     else
@@ -1083,6 +1106,10 @@ namespace ego_planner
 
     bool EGOReplanFSM::callEmergencyStop(Eigen::Vector3d stop_pos)
     {
+        if (emergency_pub_)
+        {
+            emergency_pub_->publish(std_msgs::msg::Empty{});
+        }
         planner_manager_->EmergencyStop(stop_pos);
 
         auto info = &planner_manager_->local_data_;

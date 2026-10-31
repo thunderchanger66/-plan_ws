@@ -375,6 +375,34 @@ namespace ego_planner
             }
         }
 
+        // The optimizer performs collision checks during its iterations, but
+        // the final time-rescaled spline is the one sent to PX4. Re-check the
+        // published spline over its complete duration so a refinement or
+        // numerical update can never turn an apparently successful plan into
+        // a command through an inflated obstacle voxel.
+        const double final_duration = pos.getTimeSum();
+        const double sample_step = std::max(0.01, grid_map_->getResolution() /
+                                                   std::max(pp_.max_vel_, 1e-3));
+        if (!std::isfinite(final_duration) || final_duration <= 0.0)
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("EGOPlannerManager"),
+                         "Rejecting trajectory with invalid final duration");
+            continous_failures_count_++;
+            return false;
+        }
+        for (double t = 0.0; t <= final_duration + 1e-6; t += sample_step)
+        {
+            const Eigen::Vector3d sample = pos.evaluateDeBoorT(std::min(t, final_duration));
+            if (!sample.allFinite() || grid_map_->getInflateOccupancy(sample) != 0)
+            {
+                RCLCPP_WARN(rclcpp::get_logger("EGOPlannerManager"),
+                            "Rejecting final trajectory: sample %.3f s is outside or inside inflated occupancy",
+                            t);
+                continous_failures_count_++;
+                return false;
+            }
+        }
+
         // t_refine = ros::Time::now() - t_start;
         t_refine = clock_->now() - t_start;
 
